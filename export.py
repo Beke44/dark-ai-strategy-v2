@@ -12,8 +12,9 @@ env = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
 
 
 def load_data():
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if not os.path.exists(DATA_FILE):
+    print("⚠️ Data file not found, creating empty fallback...")
+    return json.load(f)
 
 
 def ensure_dir(path):
