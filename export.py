@@ -4,7 +4,8 @@ from datetime import datetime
 from jinja2 import Environment, FileSystemLoader
 
 # ===== CONFIG =====
-DATA_FILE = "data/analyses_by_date.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, "data", "analyses_by_date.json")"
 OUTPUT_DIR = "site"
 TEMPLATE_DIR = "templates"
 
