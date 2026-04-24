@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ date }} - Dark AI Strategy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <style>
+        body {
+            font-family: Arial;
+            background: #0f172a;
+            color: white;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: auto;
+        }
+
+        .card {
+            background: #1e293b;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 12px;
+        }
+
+        .match {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        .tip {
+            color: #facc15;
+            font-size: 16px;
+        }
+
+        .meta {
+            font-size: 14px;
+            color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>📅 {{ date }}</h1>
+
+    {% for m in matches %}
+    <div class="card">
+        <div class="match">
+            {{ m.home }} vs {{ m.away }}
+        </div>
+
+        <div class="tip">
+            🎯 Tipp: {{ m.prediction }}
+        </div>
+
+        <div class="meta">
+            Odds: {{ m.odds }} | Value: {{ m.value }}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+</body>
+</html>

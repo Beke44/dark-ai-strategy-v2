@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Dark AI Strategy</title>
+</head>
+<body style="background:#0f172a;color:white;font-family:Arial;padding:20px;">
+
+<h1>📊 Dark AI Strategy</h1>
+
+<h2>📅 Elérhető napok</h2>
+
+<ul>
+    {% for d in dates %}
+        <li>
+            <a href="./{{ d }}/" style="color:gold;">
+                {{ d }}
+            </a>
+        </li>
+    {% endfor %}
+</ul>
+
+</body>
+</html>
