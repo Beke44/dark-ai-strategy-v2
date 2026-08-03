@@ -8,3 +8,6 @@ pytz
 scikit-learn
 reportlab
 scikit-learn
+fastapi
+uvicorn[standard]
+python-dotenv
