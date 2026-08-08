@@ -8,6 +8,8 @@ Ez fut Railway-en 24/7:
 
 Railway-en ez az app.py helyett fut ha Procfile-t használunk.
 VAGY: ezt töltsd fel app.py névvel a GitHub-ra.
+
+--- MÓDOSÍTVA: modell-nevek anonimizálva a nyilvános API válaszokban ---
 """
 
 import os, sys, json, logging, requests, time, threading
@@ -35,7 +37,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ─── FastAPI ──────────────────────────────────────────────────────────────────
-app = FastAPI(title="Dark AI Strategy API", version="4.0")
+app = FastAPI(title="Dark AI Strategy API", version="4.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
@@ -65,6 +67,70 @@ def send_telegram(msg: str):
         )
     except: pass
 
+# ─── ÚJ: MODELL-NÉV ANONIMIZÁLÁS ──────────────────────────────────────────────
+# A belső modellneveket SOHA nem küldjük ki nyilvánosan (versenytárs-védelem).
+# Ha új modellt adsz a rendszerhez, itt vedd fel a saját belső kulcsnevét ->
+# megjelenítendő "álnevét".
+MODEL_DISPLAY_NAMES = {
+    "monte_carlo":     "Szimulációs Modell",
+    "elo":             "Rangsor Modell",
+    "neural_network":  "Mélytanulási Modell",
+    "xgboost":         "Statisztikai Modell",
+    "form":            "Forma Modell",
+    "h2h":             "Egymás Elleni Modell",
+    "goal_stats":      "Gólstatisztikai Modell",
+    "trust":           "Megbízhatósági Modell",
+    "meta":            "Meta Modell",
+    "ensemble":        "Összesített Modell",
+}
+
+def anonymize_model_dict(raw: dict) -> dict:
+    """
+    Lecseréli a belső modellkulcsokat (pl. 'xgboost', 'elo') semleges,
+    kifelé mutatható elnevezésekre (pl. 'Modell 1', 'Modell 2'),
+    vagy a MODEL_DISPLAY_NAMES-ben megadott névre, ha van ilyen.
+    Bemenet/kimenet mindig dict marad, csak a kulcsok cserélődnek.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    result = {}
+    fallback_counter = 1
+    for k, v in raw.items():
+        display_name = MODEL_DISPLAY_NAMES.get(str(k).lower())
+        if display_name is None:
+            display_name = f"Modell {fallback_counter}"
+            fallback_counter += 1
+        result[display_name] = v
+    return result
+
+
+def sanitize_analysis_for_public(analysis: dict) -> dict:
+    """
+    Egy teljes elemzés-dict-en végigmegy, és minden olyan mezőt
+    anonimizál, ami a belső modellarchitektúrára utalhat.
+    Nem módosítja az eredeti dict-et, másolattal dolgozik.
+    """
+    if not isinstance(analysis, dict):
+        return analysis
+    safe = dict(analysis)
+
+    if "model_votes" in safe:
+        safe["model_votes"] = {
+            name: v.get("probabilities", v) if isinstance(v, dict) else v
+            for name, v in anonymize_model_dict(safe["model_votes"]).items()
+        }
+        # Formátum: {"Modell 1": {...probs...}, ...} helyett egyszerűsítve:
+        safe["model_votes"] = anonymize_model_dict(analysis.get("model_votes", {}))
+
+    if "models" in safe:
+        safe["models"] = anonymize_model_dict(safe["models"])
+
+    # Sosem küldjük ki nyers formában ezeket a mezőket, ha esetleg bekerülnének:
+    for forbidden_key in ("model_weights", "model_source_code", "internal_notes"):
+        safe.pop(forbidden_key, None)
+
+    return safe
+
 # ─── API VÉGPONTOK ────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -72,7 +138,7 @@ def root():
     return {
         "status":  "online",
         "name":    "Dark AI Strategy API",
-        "version": "4.0",
+        "version": "4.1",
         "live_monitor": _monitor_status.get("running", False),
         "api_key_set":  bool(FOOTBALL_API_KEY),
     }
@@ -223,7 +289,10 @@ def match_detail(fixture_id: int):
             "fixture_id", fixture_id).order(
             "created_at", desc=True).limit(1).execute()
         if result.data:
-            return {"fixture_id": fixture_id, "analysis": result.data[0], "source": "supabase"}
+            analysis = result.data[0]
+            # --- MÓDOSÍTVA: modellnevek anonimizálva, mielőtt kimegy ---
+            analysis = sanitize_analysis_for_public(analysis)
+            return {"fixture_id": fixture_id, "analysis": analysis, "source": "supabase"}
         # Live API fallback
         fix_data = football_api("fixtures", {"id": fixture_id})
         if not fix_data.get("response"):
@@ -332,6 +401,133 @@ def match_h2h(fixture_id: int):
         },
         "matches": matches
     }
+
+# ─── ÚJ: STATISZTIKÁK VÉGPONT (korábban hiányzott!) ───────────────────────────
+@app.get("/api/match/{fixture_id}/stats")
+def match_stats(fixture_id: int):
+    """
+    xG, forma, csapat-erő és egyéb bővített statisztikák egy meccshez.
+    Ha a meccs élő, megpróbálja lekérni az élő statisztikákat is.
+    """
+    try:
+        fix_data = football_api("fixtures", {"id": fixture_id})
+        if not fix_data.get("response"):
+            return {"error": "Not found"}
+        fix    = fix_data["response"][0]
+        status = fix.get("fixture", {}).get("status", {}).get("short", "")
+
+        live_stats = None
+        if status in {"1H", "2H", "HT", "ET", "P"}:
+            stats_data = football_api("fixtures/statistics", {"fixture": fixture_id})
+            live_stats = stats_data.get("response", [])
+
+        # Kiegészítő adatok az elemzésből (Supabase), ha van
+        analysis_extra = {}
+        try:
+            sb = get_sb()
+            res = sb.table("match_analyses").select("*").eq(
+                "fixture_id", fixture_id).order("created_at", desc=True).limit(1).execute()
+            if res.data:
+                a = sanitize_analysis_for_public(res.data[0])
+                analysis_extra = {
+                    "h_power":    a.get("h_power"),
+                    "a_power":    a.get("a_power"),
+                    "h_form_str": a.get("h_form_str"),
+                    "a_form_str": a.get("a_form_str"),
+                    "h_xg":       a.get("h_xg"),
+                    "a_xg":       a.get("a_xg"),
+                    "h_injuries": a.get("h_injuries"),
+                    "a_injuries": a.get("a_injuries"),
+                }
+        except Exception:
+            pass
+
+        return {
+            "fixture_id":  fixture_id,
+            "status":      status,
+            "live_stats":  live_stats,
+            "pre_match":   analysis_extra,
+            "note": None if (live_stats or analysis_extra) else "Élő statisztikák a meccs alatt elérhetők",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ─── ÚJ: KEZDŐCSAPAT (LINEUP) VÉGPONT (korábban hiányzott!) ───────────────────
+@app.get("/api/match/{fixture_id}/lineup")
+def match_lineup(fixture_id: int):
+    try:
+        data = football_api("fixtures/lineups", {"fixture": fixture_id})
+        response = data.get("response", [])
+        if not response:
+            return {
+                "fixture_id": fixture_id,
+                "available": False,
+                "note": "Kezdőcsapat kb. 1 órával a meccs előtt jelenik meg",
+            }
+        teams = []
+        for team_lineup in response:
+            teams.append({
+                "team":       team_lineup.get("team", {}).get("name", ""),
+                "formation":  team_lineup.get("formation", ""),
+                "coach":      team_lineup.get("coach", {}).get("name", ""),
+                "startXI": [
+                    {
+                        "name":  p.get("player", {}).get("name", ""),
+                        "number": p.get("player", {}).get("number"),
+                        "pos":   p.get("player", {}).get("pos", ""),
+                    }
+                    for p in team_lineup.get("startXI", [])
+                ],
+                "substitutes": [
+                    {
+                        "name":  p.get("player", {}).get("name", ""),
+                        "number": p.get("player", {}).get("number"),
+                        "pos":   p.get("player", {}).get("pos", ""),
+                    }
+                    for p in team_lineup.get("substitutes", [])
+                ],
+            })
+        return {"fixture_id": fixture_id, "available": True, "teams": teams}
+    except Exception as e:
+        return {"error": str(e)}
+
+# ─── ÚJ: LIGA TABELLA VÉGPONT (korábban hiányzott!) ───────────────────────────
+@app.get("/api/match/{fixture_id}/standings")
+def match_standings(fixture_id: int):
+    try:
+        fix_data = football_api("fixtures", {"id": fixture_id})
+        if not fix_data.get("response"):
+            return {"error": "Not found"}
+        fix        = fix_data["response"][0]
+        league_id  = fix.get("league", {}).get("id")
+        season     = fix.get("league", {}).get("season")
+        if not league_id or not season:
+            return {"error": "Missing league/season"}
+
+        data = football_api("standings", {"league": league_id, "season": season})
+        response = data.get("response", [])
+        if not response:
+            return {"fixture_id": fixture_id, "available": False, "standings": []}
+
+        table = response[0].get("league", {}).get("standings", [[]])[0]
+        standings = [
+            {
+                "rank":   row.get("rank"),
+                "team":   row.get("team", {}).get("name", ""),
+                "played": row.get("all", {}).get("played", 0),
+                "win":    row.get("all", {}).get("win", 0),
+                "draw":   row.get("all", {}).get("draw", 0),
+                "lose":   row.get("all", {}).get("lose", 0),
+                "gf":     row.get("all", {}).get("goals", {}).get("for", 0),
+                "ga":     row.get("all", {}).get("goals", {}).get("against", 0),
+                "points": row.get("points", 0),
+                "form":   row.get("form", ""),
+            }
+            for row in table
+        ]
+        return {"fixture_id": fixture_id, "available": True, "standings": standings}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/live/fixtures")
 def live_fixtures():
@@ -634,4 +830,7 @@ async def startup_event():
     else:
         log.warning("⚠️ FOOTBALL_API_KEY hiányzik – Live Monitor nem indul!")
 
-import threading
+# ─── ÚJ: uvicorn induló parancs (korábban hiányzott!) ─────────────────────────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
