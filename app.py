@@ -423,6 +423,7 @@ def match_stats(fixture_id: int):
 
         # Kiegészítő adatok az elemzésből (Supabase), ha van
         analysis_extra = {}
+        _debug_error = None
         try:
             sb = get_sb()
             res = sb.table("match_analyses").select("*").eq(
@@ -439,14 +440,17 @@ def match_stats(fixture_id: int):
                     "h_injuries": a.get("h_injuries"),
                     "a_injuries": a.get("a_injuries"),
                 }
-        except Exception:
-            pass
+            else:
+                _debug_error = "res.data volt üres (nem talált sort ezzel a fixture_id-vel)"
+        except Exception as _dbg_e:
+            _debug_error = f"{type(_dbg_e).__name__}: {_dbg_e}"
 
         return {
             "fixture_id":  fixture_id,
             "status":      status,
             "live_stats":  live_stats,
             "pre_match":   analysis_extra,
+            "debug_error": _debug_error,
             "note": None if (live_stats or analysis_extra) else "Élő statisztikák a meccs alatt elérhetők",
         }
     except Exception as e:
