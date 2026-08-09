@@ -57,14 +57,32 @@ def football_api(endpoint: str, params: dict = {}) -> dict:
         return r.json()
     except: return {}
 
-def send_telegram(msg: str):
+def send_telegram(msg: str, category: str = None, fixture_id: int = None):
+    """
+    Küld egy Telegram üzenetet, és a message_id-t elmenti a Supabase
+    telegram_messages táblájába - ez teszi lehetővé a későbbi (2 nap
+    utáni) automatikus törlést.
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL: return
     try:
-        requests.post(
+        r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHANNEL, "text": msg, "parse_mode": "HTML"},
             timeout=10
         )
+        result = r.json()
+        message_id = result.get("result", {}).get("message_id")
+        if message_id:
+            try:
+                sb = get_sb()
+                sb.table("telegram_messages").insert({
+                    "message_id": message_id,
+                    "chat_id": str(TELEGRAM_CHANNEL),
+                    "category": category,
+                    "fixture_id": fixture_id,
+                }).execute()
+            except Exception as _log_e:
+                log.error(f"telegram_messages log hiba: {_log_e}")
     except: pass
 
 # ─── ÚJ: MODELL-NÉV ANONIMIZÁLÁS ──────────────────────────────────────────────
@@ -653,6 +671,134 @@ _monitor_status = {
 }
 _sent_alerts = set()
 _last_scores = {}
+_last_critical_alert = {}  # fixture_id -> utolsó kritikus cash-out üzenet ideje (timestamp)
+_last_daily_maintenance_date = None  # dátum, amikor utoljára lefutott a napi Telegram-karbantartás
+
+# Meccsenkénti minimum időköz (másodperc) a kritikus cash-out javaslatok között,
+# hogy egy hektikus meccs se árassza el a Telegram csatornát.
+CRITICAL_ALERT_COOLDOWN_SEC = 300  # 5 perc
+
+TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram üzenetek
+
+
+def _is_recommended_tip(t: dict) -> bool:
+    """Ugyanaz a logika, mint a Lovable frontend szűrője:
+    egy tipp akkor számít 'tét ajánlásosnak', ha van Kelly-tét,
+    value bet jelzés, vagy smart_pro elfogadás."""
+    try:
+        return bool(
+            (t.get("rec_stake") and float(t.get("rec_stake") or 0) > 0) or
+            (t.get("kelly_fraction") and float(t.get("kelly_fraction") or 0) > 0) or
+            t.get("is_value_bet") is True or
+            t.get("smart_pro") is True
+        )
+    except Exception:
+        return False
+
+
+def build_daily_summary_message(target_date: str) -> str:
+    """
+    Összeállít egy napi összesítő Telegram üzenetet a megadott napra
+    (YYYY-MM-DD), külön szekcióval a tét ajánlásos és a tét ajánlás
+    nélküli tippekre.
+    """
+    try:
+        sb = get_sb()
+        result = sb.table("tips").select("*").execute()
+        all_tips = result.data or []
+    except Exception as e:
+        log.error(f"Napi összesítő - tips lekérés hiba: {e}")
+        return None
+
+    day_tips = [t for t in all_tips if str(t.get("created_at", ""))[:10] == target_date]
+    if not day_tips:
+        return None
+
+    def summarize(tips_subset):
+        closed = [t for t in tips_subset if t.get("result_status") in ("Win", "Lost")]
+        wins = sum(1 for t in closed if t.get("result_status") == "Win")
+        profit = sum(float(t.get("profit") or 0) for t in closed)
+        return {
+            "total": len(tips_subset),
+            "closed": len(closed),
+            "wins": wins,
+            "losses": len(closed) - wins,
+            "win_rate": round(wins / max(len(closed), 1) * 100, 1),
+            "profit": round(profit, 0),
+        }
+
+    recommended = [t for t in day_tips if _is_recommended_tip(t)]
+    normal      = [t for t in day_tips if not _is_recommended_tip(t)]
+
+    r = summarize(recommended)
+    n = summarize(normal)
+
+    msg  = f"📊 <b>Napi összesítő – {target_date}</b>\n\n"
+    msg += f"💎 <b>Tét ajánlásos tippek</b> ({r['total']} db)\n"
+    msg += f"  ✅ {r['wins']} győzelem / ❌ {r['losses']} vesztés (win rate: {r['win_rate']}%)\n"
+    msg += f"  💰 Összprofit: {r['profit']:+,.0f} coin\n\n"
+    msg += f"📋 <b>Tét ajánlás nélküli tippek</b> ({n['total']} db)\n"
+    msg += f"  ✅ {n['wins']} győzelem / ❌ {n['losses']} vesztés (win rate: {n['win_rate']}%)\n"
+    msg += f"  💰 Összprofit: {n['profit']:+,.0f} coin\n\n"
+    msg += f"<i>Ennek a napnak a részletes élő értesítései mostantól törlésre kerülnek "
+    msg += f"a csatornából ({TELEGRAM_RETENTION_DAYS} napos megőrzési szabály).</i>"
+    return msg
+
+
+def delete_old_telegram_messages(older_than_date: str):
+    """
+    Töröl minden Telegram üzenetet a csatornából, ami `older_than_date`
+    (YYYY-MM-DD) napon vagy azelőtt lett elküldve, majd törli a
+    hozzájuk tartozó nyilvántartási sorokat is a Supabase-ből.
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
+        return
+    try:
+        sb = get_sb()
+        result = sb.table("telegram_messages").select("*").lte(
+            "sent_at", f"{older_than_date}T23:59:59"
+        ).execute()
+        old_messages = result.data or []
+    except Exception as e:
+        log.error(f"telegram_messages lekérés hiba: {e}")
+        return
+
+    deleted_count = 0
+    for row in old_messages:
+        msg_id = row.get("message_id")
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage",
+                json={"chat_id": TELEGRAM_CHANNEL, "message_id": msg_id},
+                timeout=10
+            )
+            deleted_count += 1
+        except Exception as e:
+            log.error(f"Telegram üzenet törlés hiba (message_id={msg_id}): {e}")
+        try:
+            sb.table("telegram_messages").delete().eq("id", row.get("id")).execute()
+        except Exception:
+            pass
+
+    log.info(f"🧹 Telegram karbantartás: {deleted_count} régi üzenet törölve ({older_than_date} és korábbi).")
+
+
+def run_daily_telegram_maintenance():
+    """
+    Naponta egyszer lefutó karbantartás:
+    1. Elküldi az összesítőt arra a napra, ami most válik "régivé"
+       (a megőrzési határ napja).
+    2. Törli a csatornából az annál a napnál régebbi egyedi üzeneteket.
+    """
+    purge_date = (date.today() - timedelta(days=TELEGRAM_RETENTION_DAYS)).isoformat()
+
+    summary_msg = build_daily_summary_message(purge_date)
+    if summary_msg:
+        send_telegram(summary_msg, category="daily_summary")
+
+    delete_old_telegram_messages(purge_date)
+
+
 
 def get_todays_tips_from_supabase() -> dict:
     """Mai pending tippek fixture_id → tip mapping."""
@@ -710,6 +856,18 @@ def live_monitor_loop():
     while True:
         try:
             cycle_start = time.time()
+
+            # ─── ÚJ: napi Telegram karbantartás (összesítő + régi üzenetek törlése) ───
+            global _last_daily_maintenance_date
+            today_iso = date.today().isoformat()
+            if _last_daily_maintenance_date != today_iso:
+                try:
+                    run_daily_telegram_maintenance()
+                except Exception as _maint_e:
+                    log.error(f"Napi Telegram karbantartás hiba: {_maint_e}")
+                _last_daily_maintenance_date = today_iso
+            # ────────────────────────────────────────────────────────────────────────
+
             today_tips  = get_todays_tips_from_supabase()
             _monitor_status["active_tips"] = len(today_tips)
 
@@ -798,16 +956,22 @@ def live_monitor_loop():
                                 _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
 
                 # Cash out kritikus javaslat (állásváltozás nélkül is)
+                # MÓDOSÍTVA: csak "critical" szintű helyzetnél küldünk üzenetet
+                # (a "high"/"megfontolandó" szintet szándékosan kihagyjuk - túl sok
+                # üzenetet generált), ÉS meccsenkénti minimum időközt (cooldown)
+                # is alkalmazunk, hogy egy hektikus meccs se árassza el a csatornát.
                 sit = analyze_situation(tip, fixture, [])
-                if sit["urgency"] in ["critical","high"]:
-                    alert_k = f"{fid}_{sit['action']}_{minute//10}"
-                    if alert_k not in _sent_alerts:
-                        _sent_alerts.add(alert_k)
+                if sit["urgency"] == "critical":
+                    now_ts   = time.time()
+                    last_ts  = _last_critical_alert.get(fid, 0)
+                    if now_ts - last_ts >= CRITICAL_ALERT_COOLDOWN_SEC:
+                        _last_critical_alert[fid] = now_ts
                         msg  = f"{sit['action']}\n"
                         msg += f"🏟️ {home_nm} {hg}–{ag} {away_nm} ({minute}')\n"
                         msg += f"🎯 Your tip: {pred} @ {orig_odds:.2f}\n"
                         msg += f"• {sit['reason']}"
                         send_telegram(msg)
+                        _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
 
                 # Meccs vége
                 if status in {"FT","AET","PEN"}:
