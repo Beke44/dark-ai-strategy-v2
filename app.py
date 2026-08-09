@@ -764,13 +764,23 @@ def match_injuries(fixture_id: int):
         data = football_api("injuries", {"fixture": fixture_id})
         response = data.get("response", [])
         players = []
+        seen = set()
         for item in response:
             player_info = item.get("player", {}) or {}
+            name = player_info.get("name", "")
+            team = (item.get("team", {}) or {}).get("name", "")
+            # Dedupe: az API-Sports.io néha kétszer adja vissza ugyanazt a
+            # sérülést - név + csapat + ok alapján szűrjük ki a duplikátumot.
+            reason = player_info.get("reason", "")
+            dedupe_key = (name, team, reason)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
             players.append({
-                "player": player_info.get("name", ""),
-                "team":   (item.get("team", {}) or {}).get("name", ""),
+                "player": name,
+                "team":   team,
                 "type":   player_info.get("type", ""),      # pl. "Missing Fixture", "Questionable"
-                "reason": player_info.get("reason", ""),    # pl. "Knee Injury", "Suspended"
+                "reason": reason,                            # pl. "Knee Injury", "Suspended"
             })
         return {"fixture_id": fixture_id, "count": len(players), "players": players}
     except Exception as e:
