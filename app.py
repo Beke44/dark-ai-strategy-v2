@@ -84,15 +84,31 @@ MODEL_DISPLAY_NAMES = {
     "ensemble":        "Összesített Modell",
 }
 
-def anonymize_model_dict(raw: dict) -> dict:
+def _coerce_to_dict(raw):
+    """
+    Supabase-ből néha JSON-string formában jön vissza egy mező
+    (pl. ha mentéskor json.dumps()-szal lett elmentve egy text/jsonb oszlopba).
+    Ez a segédfüggvény biztonságosan dict-té alakítja, akármilyen formában jön.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def anonymize_model_dict(raw) -> dict:
     """
     Lecseréli a belső modellkulcsokat (pl. 'xgboost', 'elo') semleges,
     kifelé mutatható elnevezésekre (pl. 'Modell 1', 'Modell 2'),
     vagy a MODEL_DISPLAY_NAMES-ben megadott névre, ha van ilyen.
-    Bemenet/kimenet mindig dict marad, csak a kulcsok cserélődnek.
+    Elfogadja dict vagy JSON-string formában is a bemenetet.
     """
-    if not isinstance(raw, dict):
-        return raw
+    raw = _coerce_to_dict(raw)
     result = {}
     fallback_counter = 1
     for k, v in raw.items():
@@ -109,21 +125,20 @@ def sanitize_analysis_for_public(analysis: dict) -> dict:
     Egy teljes elemzés-dict-en végigmegy, és minden olyan mezőt
     anonimizál, ami a belső modellarchitektúrára utalhat.
     Nem módosítja az eredeti dict-et, másolattal dolgozik.
+    Kezeli azt az esetet is, ha model_votes/models JSON-stringként jött Supabase-ből.
     """
     if not isinstance(analysis, dict):
         return analysis
     safe = dict(analysis)
 
     if "model_votes" in safe:
-        safe["model_votes"] = {
-            name: v.get("probabilities", v) if isinstance(v, dict) else v
-            for name, v in anonymize_model_dict(safe["model_votes"]).items()
-        }
-        # Formátum: {"Modell 1": {...probs...}, ...} helyett egyszerűsítve:
-        safe["model_votes"] = anonymize_model_dict(analysis.get("model_votes", {}))
+        safe["model_votes"] = anonymize_model_dict(safe["model_votes"])
 
     if "models" in safe:
         safe["models"] = anonymize_model_dict(safe["models"])
+
+    if "raw_probs" in safe:
+        safe["raw_probs"] = _coerce_to_dict(safe["raw_probs"])
 
     # Sosem küldjük ki nyers formában ezeket a mezőket, ha esetleg bekerülnének:
     for forbidden_key in ("model_weights", "model_source_code", "internal_notes"):
