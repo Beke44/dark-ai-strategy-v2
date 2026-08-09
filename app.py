@@ -57,6 +57,161 @@ def football_api(endpoint: str, params: dict = {}) -> dict:
         return r.json()
     except: return {}
 
+# ─── ÚJ: ÉLŐ ESEMÉNYEK ÉS RÉSZLETES STATISZTIKA FELDOLGOZÁSA ──────────────────
+_STAT_KEY_MAP = {
+    "Shots on Goal":     "shots_on_target",
+    "Shots off Goal":    "shots_off_target",
+    "Total Shots":       "total_shots",
+    "Blocked Shots":     "blocked_shots",
+    "Shots insidebox":   "shots_inside_box",
+    "Shots outsidebox":  "shots_outside_box",
+    "Fouls":             "fouls",
+    "Corner Kicks":      "corners",
+    "Offsides":          "offsides",
+    "Ball Possession":   "possession",
+    "Yellow Cards":      "yellow_cards",
+    "Red Cards":         "red_cards",
+    "Goalkeeper Saves":  "goalkeeper_saves",
+    "Total passes":      "total_passes",
+    "Passes accurate":   "passes_accurate",
+    "Passes %":          "passes_percent",
+    "expected_goals":    "xg",
+}
+
+def get_live_stats_parsed(fixture_id: int):
+    """Csapatonkénti, tisztán feldolgozott élő statisztika (lövések,
+    birtoklás, szöglet, lapok stb.) - nem a nyers API válasz."""
+    data = football_api("fixtures/statistics", {"fixture": fixture_id})
+    response = data.get("response", [])
+    if not response:
+        return None
+    result = {}
+    for team_block in response:
+        team_name = team_block.get("team", {}).get("name", "")
+        stats = {}
+        for s in team_block.get("statistics", []):
+            key = _STAT_KEY_MAP.get(s.get("type", ""))
+            if key:
+                stats[key] = s.get("value")
+        result[team_name] = stats
+    return result
+
+
+def get_match_events(fixture_id: int):
+    """Esemény-napló: gólok, lapok, cserék percenkénti bontásban."""
+    data = football_api("fixtures/events", {"fixture": fixture_id})
+    events = []
+    for ev in data.get("response", []):
+        events.append({
+            "minute":       ev.get("time", {}).get("elapsed"),
+            "extra_minute": ev.get("time", {}).get("extra"),
+            "type":         ev.get("type", ""),      # Goal / Card / subst / Var
+            "detail":       ev.get("detail", ""),    # Normal Goal / Yellow Card / Substitution 1 ...
+            "team":         ev.get("team", {}).get("name", ""),
+            "player":       ev.get("player", {}).get("name", ""),
+            "assist":       (ev.get("assist") or {}).get("name"),
+        })
+    # Régi eseményektől az újabbak felé rendezve (percek szerint)
+    events.sort(key=lambda e: (e.get("minute") or 0, e.get("extra_minute") or 0))
+    return events
+# ────────────────────────────────────────────────────────────────────────────
+
+# ─── ÚJ: CSAPAT SZEZON-STATISZTIKA (mélyebb, mint a puszta tabella) ───────────
+def get_team_season_stats(team_id: int, league_id: int, season) -> dict:
+    """
+    Csapat egész szezonos statisztikája: hazai/vendég gólátlag,
+    clean sheet szám, gólnélküli meccsek száma, legjobb győzelmi sorozat,
+    jelenlegi forma-string. Sokkal mélyebb, mint a tabella egy sora.
+    """
+    data = football_api("teams/statistics", {
+        "team": team_id, "league": league_id, "season": season
+    })
+    r = data.get("response") or {}
+    if not r:
+        return None
+
+    fixtures       = r.get("fixtures", {}) or {}
+    goals          = r.get("goals", {}) or {}
+    biggest        = r.get("biggest", {}) or {}
+    clean_sheet    = r.get("clean_sheet", {}) or {}
+    failed_to_score = r.get("failed_to_score", {}) or {}
+
+    goals_for_avg     = (goals.get("for", {}) or {}).get("average", {}) or {}
+    goals_against_avg = (goals.get("against", {}) or {}).get("average", {}) or {}
+
+    return {
+        "team":                    r.get("team", {}).get("name"),
+        "form":                    r.get("form"),
+        "played_total":            (fixtures.get("played", {}) or {}).get("total"),
+        "wins_total":              (fixtures.get("wins", {}) or {}).get("total"),
+        "draws_total":             (fixtures.get("draws", {}) or {}).get("total"),
+        "loses_total":             (fixtures.get("loses", {}) or {}).get("total"),
+        "goals_for_avg_total":     goals_for_avg.get("total"),
+        "goals_for_avg_home":      goals_for_avg.get("home"),
+        "goals_for_avg_away":      goals_for_avg.get("away"),
+        "goals_against_avg_total": goals_against_avg.get("total"),
+        "goals_against_avg_home":  goals_against_avg.get("home"),
+        "goals_against_avg_away":  goals_against_avg.get("away"),
+        "clean_sheets_total":      clean_sheet.get("total"),
+        "failed_to_score_total":   failed_to_score.get("total"),
+        "biggest_win_streak":      (biggest.get("streak", {}) or {}).get("wins"),
+        "biggest_win_home":        (biggest.get("wins", {}) or {}).get("home"),
+        "biggest_win_away":        (biggest.get("wins", {}) or {}).get("away"),
+    }
+# ────────────────────────────────────────────────────────────────────────────
+
+# ─── ÚJ: ODDS-MOZGÁS KÖVETÉSE ("éles pénz" jelzés) ────────────────────────────
+def record_and_get_odds_movement(fixture_id: int, current_odds: dict):
+    """
+    Minden lekérdezéskor elmenti a jelenlegi legjobb odds-okat egy
+    historikus (insert-only) Supabase táblába, majd összeveti a
+    legkorábban rögzített ("nyitó") értékkel. Ha egy oldal odds-a
+    jelentősen (>=7%) csökkent a nyitó óta, az klasszikus jele annak,
+    hogy nagyobb tétek érkeztek arra az oldalra ("éles pénz").
+    """
+    try:
+        sb = get_sb()
+        sb.table("odds_snapshots").insert({
+            "fixture_id": fixture_id,
+            "home_odd":   current_odds.get("home"),
+            "draw_odd":   current_odds.get("draw"),
+            "away_odd":   current_odds.get("away"),
+        }).execute()
+
+        result = sb.table("odds_snapshots").select("*").eq(
+            "fixture_id", fixture_id).order("captured_at", desc=False).limit(1).execute()
+        if not result.data:
+            return None
+        opening = result.data[0]
+
+        def pct_change(open_v, curr_v):
+            if not open_v or not curr_v:
+                return None
+            return round((curr_v - open_v) / open_v * 100, 2)
+
+        movement = {
+            "home": {"opening": opening.get("home_odd"), "current": current_odds.get("home"),
+                      "change_pct": pct_change(opening.get("home_odd"), current_odds.get("home"))},
+            "draw": {"opening": opening.get("draw_odd"), "current": current_odds.get("draw"),
+                      "change_pct": pct_change(opening.get("draw_odd"), current_odds.get("draw"))},
+            "away": {"opening": opening.get("away_odd"), "current": current_odds.get("away"),
+                      "change_pct": pct_change(opening.get("away_odd"), current_odds.get("away"))},
+        }
+
+        SHARP_THRESHOLD = -7.0  # % - ennél nagyobb odds-csökkenés számít jelzésnek
+        sharp_signal = None
+        for side in ("home", "draw", "away"):
+            chg = movement[side]["change_pct"]
+            if chg is not None and chg <= SHARP_THRESHOLD:
+                sharp_signal = side
+                break
+        movement["sharp_signal"] = sharp_signal
+        return movement
+    except Exception as e:
+        log.error(f"Odds movement hiba: {e}")
+        return None
+# ────────────────────────────────────────────────────────────────────────────
+
 def send_telegram(msg: str, category: str = None, fixture_id: int = None):
     """
     Küld egy Telegram üzenetet, és a message_id-t elmenti a Supabase
@@ -372,6 +527,10 @@ def match_odds(fixture_id: int):
                 if vals.get("Draw",0) > best_d: best_d=vals["Draw"]; bk_d=bk["name"]
                 if vals.get("Away",0) > best_a: best_a=vals["Away"]; bk_a=bk["name"]
         bookmakers.append(bk_data)
+
+    # ÚJ: odds-mozgás rögzítése és lekérdezése (nyitó vs jelenlegi)
+    movement = record_and_get_odds_movement(fixture_id, {"home": best_h, "draw": best_d, "away": best_a})
+
     return {
         "fixture_id": fixture_id,
         "bookmakers": bookmakers,
@@ -383,8 +542,58 @@ def match_odds(fixture_id: int):
         "arbitrage": {
             "margin": round(1/max(best_h,.01)+1/max(best_d,.01)+1/max(best_a,.01),4),
             "is_arb": (1/max(best_h,.01)+1/max(best_d,.01)+1/max(best_a,.01)) < 1.0
-        }
+        },
+        "movement": movement,
     }
+
+# ─── ÚJ: CSAPAT SZEZON-STATISZTIKA VÉGPONT ────────────────────────────────────
+@app.get("/api/match/{fixture_id}/team-stats")
+def match_team_stats(fixture_id: int):
+    """
+    Mindkét csapat teljes szezonos statisztikája: gólátlag hazai/vendég
+    bontásban, clean sheet szám, gólnélküli meccsek, legjobb sorozat.
+    Sokkal mélyebb elemzési alap, mint a puszta liga-tabella.
+    """
+    try:
+        fix_data = football_api("fixtures", {"id": fixture_id})
+        if not fix_data.get("response"):
+            return {"error": "Not found"}
+        fix       = fix_data["response"][0]
+        league_id = fix.get("league", {}).get("id")
+        season    = fix.get("league", {}).get("season")
+        home_id   = fix.get("teams", {}).get("home", {}).get("id")
+        away_id   = fix.get("teams", {}).get("away", {}).get("id")
+        if not league_id or not season:
+            return {"error": "Missing league/season"}
+
+        home_stats = get_team_season_stats(home_id, league_id, season)
+        away_stats = get_team_season_stats(away_id, league_id, season)
+        return {"fixture_id": fixture_id, "home": home_stats, "away": away_stats}
+    except Exception as e:
+        return {"error": str(e)}
+
+# ─── ÚJ: RÉSZLETES SÉRÜLÉSEK/ELTILTÁSOK VÉGPONT ───────────────────────────────
+@app.get("/api/match/{fixture_id}/injuries")
+def match_injuries(fixture_id: int):
+    """
+    Név szerinti sérült/eltiltott játékos lista mindkét csapatnál,
+    az ok megjelölésével (sérülés / eltiltás / kétséges).
+    """
+    try:
+        data = football_api("injuries", {"fixture": fixture_id})
+        response = data.get("response", [])
+        players = []
+        for item in response:
+            player_info = item.get("player", {}) or {}
+            players.append({
+                "player": player_info.get("name", ""),
+                "team":   (item.get("team", {}) or {}).get("name", ""),
+                "type":   player_info.get("type", ""),      # pl. "Missing Fixture", "Questionable"
+                "reason": player_info.get("reason", ""),    # pl. "Knee Injury", "Suspended"
+            })
+        return {"fixture_id": fixture_id, "count": len(players), "players": players}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/match/{fixture_id}/h2h")
 def match_h2h(fixture_id: int):
@@ -440,7 +649,9 @@ def match_h2h(fixture_id: int):
 def match_stats(fixture_id: int):
     """
     xG, forma, csapat-erő és egyéb bővített statisztikák egy meccshez.
-    Ha a meccs élő, megpróbálja lekérni az élő statisztikákat is.
+    Ha a meccs élő vagy véget ért, visszaadja a részletes élő statisztikát
+    (lövések, birtoklás, szöglet, lapok) és az esemény-naplót is
+    (gólok, lapok, cserék percenkénti bontásban).
     """
     try:
         fix_data = football_api("fixtures", {"id": fixture_id})
@@ -448,11 +659,15 @@ def match_stats(fixture_id: int):
             return {"error": "Not found"}
         fix    = fix_data["response"][0]
         status = fix.get("fixture", {}).get("status", {}).get("short", "")
+        goals  = fix.get("goals", {})
+        minute = fix.get("fixture", {}).get("status", {}).get("elapsed")
 
-        live_stats = None
-        if status in {"1H", "2H", "HT", "ET", "P"}:
-            stats_data = football_api("fixtures/statistics", {"fixture": fixture_id})
-            live_stats = stats_data.get("response", [])
+        # Élő vagy már véget ért meccsnél lekérjük a részletes statot és eseményeket
+        live_stats   = None
+        match_events = None
+        if status in {"1H", "2H", "HT", "ET", "P", "FT", "AET", "PEN"}:
+            live_stats   = get_live_stats_parsed(fixture_id)
+            match_events = get_match_events(fixture_id)
 
         # Kiegészítő adatok az elemzésből (Supabase), ha van
         analysis_extra = {}
@@ -479,11 +694,14 @@ def match_stats(fixture_id: int):
             _debug_error = f"{type(_dbg_e).__name__}: {_dbg_e}"
 
         return {
-            "fixture_id":  fixture_id,
-            "status":      status,
-            "live_stats":  live_stats,
-            "pre_match":   analysis_extra,
-            "debug_error": _debug_error,
+            "fixture_id":     fixture_id,
+            "status":         status,
+            "minute":         minute,
+            "score":          {"home": goals.get("home"), "away": goals.get("away")},
+            "live_stats":     live_stats,
+            "events":         match_events,
+            "pre_match":      analysis_extra,
+            "debug_error":    _debug_error,
             "note": None if (live_stats or analysis_extra) else "Élő statisztikák a meccs alatt elérhetők",
         }
     except Exception as e:
