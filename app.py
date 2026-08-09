@@ -1043,38 +1043,45 @@ def bankroll():
 @app.get("/api/arbitrage")
 @simple_cache(300)
 def arbitrage(date_str: str = ""):
-    target = date_str or date.today().strftime("%Y-%m-%d")
-    data   = football_api("fixtures", {"date": target, "status": "NS"})
-    arbs   = []
-    for fix in data.get("response",[])[:20]:
-        fid     = fix.get("fixture",{}).get("id")
-        home_nm = fix.get("teams",{}).get("home",{}).get("name","")
-        away_nm = fix.get("teams",{}).get("away",{}).get("name","")
-        league  = fix.get("league",{}).get("name","")
-        odds_d  = football_api("odds", {"fixture": fid})
-        bh=bd=ba=0.0; nbh=nbd=nba=""
-        for bk in odds_d.get("response",[{}])[0].get("bookmakers",[]):
-            for bet in bk.get("bets",[]):
-                if bet.get("name")=="Match Winner":
-                    for v in bet.get("values",[]):
-                        odd=float(v.get("odd",0))
-                        if v["value"]=="Home" and odd>bh: bh=odd; nbh=bk["name"]
-                        if v["value"]=="Draw" and odd>bd: bd=odd; nbd=bk["name"]
-                        if v["value"]=="Away" and odd>ba: ba=odd; nba=bk["name"]
-        if bh>1 and bd>1 and ba>1:
-            margin = 1/bh+1/bd+1/ba
-            if margin < 1.0:
-                arbs.append({
-                    "fixture_id": fid, "home_team": home_nm,
-                    "away_team": away_nm, "league": league,
-                    "profit_pct": round((1-margin)*100,2),
-                    "best_odds": {
-                        "home":{"odd":bh,"bookmaker":nbh},
-                        "draw":{"odd":bd,"bookmaker":nbd},
-                        "away":{"odd":ba,"bookmaker":nba},
-                    }
-                })
-    return {"date": target, "count": len(arbs), "opportunities": arbs}
+    try:
+        target = date_str or date.today().strftime("%Y-%m-%d")
+        data   = football_api("fixtures", {"date": target, "status": "NS"})
+        arbs   = []
+        for fix in data.get("response",[])[:20]:
+            fid     = fix.get("fixture",{}).get("id")
+            home_nm = fix.get("teams",{}).get("home",{}).get("name","")
+            away_nm = fix.get("teams",{}).get("away",{}).get("name","")
+            league  = fix.get("league",{}).get("name","")
+            odds_d  = football_api("odds", {"fixture": fid})
+            # MÓDOSÍTVA: biztonságos hozzáférés, ha a "response" üres lista
+            # (nincs elérhető odds ehhez a meccshez) - korábban ez IndexError-t
+            # dobott, ami az egész végpontot lefagyasztotta.
+            odds_response = odds_d.get("response") or [{}]
+            bh=bd=ba=0.0; nbh=nbd=nba=""
+            for bk in (odds_response[0] or {}).get("bookmakers",[]):
+                for bet in bk.get("bets",[]):
+                    if bet.get("name")=="Match Winner":
+                        for v in bet.get("values",[]):
+                            odd=float(v.get("odd",0))
+                            if v["value"]=="Home" and odd>bh: bh=odd; nbh=bk["name"]
+                            if v["value"]=="Draw" and odd>bd: bd=odd; nbd=bk["name"]
+                            if v["value"]=="Away" and odd>ba: ba=odd; nba=bk["name"]
+            if bh>1 and bd>1 and ba>1:
+                margin = 1/bh+1/bd+1/ba
+                if margin < 1.0:
+                    arbs.append({
+                        "fixture_id": fid, "home_team": home_nm,
+                        "away_team": away_nm, "league": league,
+                        "profit_pct": round((1-margin)*100,2),
+                        "best_odds": {
+                            "home":{"odd":bh,"bookmaker":nbh},
+                            "draw":{"odd":bd,"bookmaker":nbd},
+                            "away":{"odd":ba,"bookmaker":nba},
+                        }
+                    })
+        return {"date": target, "count": len(arbs), "opportunities": arbs}
+    except Exception as e:
+        return {"error": str(e), "date": target if 'target' in dir() else date_str, "count": 0, "opportunities": []}
 
 # ─── LIVE MONITOR (háttérszál) ────────────────────────────────────────────────
 _monitor_status = {
