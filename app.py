@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # FastAPI
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
@@ -1009,6 +1009,120 @@ def live_fixtures():
 def live_status():
     """Live monitor aktuális állapota."""
     return _monitor_status
+
+# ─── ÚJ: TELEGRAM ELITE HOZZÁFÉRÉS-KEZELÉS ────────────────────────────────────
+# Egyedi, egyszer használatos, lejáró meghívó linkek + automatikus eltávolítás
+# lemondáskor. Ez váltja fel a statikus t.me/dark_ai_tips linket, ami korábban
+# azt jelentette, hogy egyszeri belépés után valaki örökre bent maradt.
+
+@app.post("/api/telegram/create-invite")
+def telegram_create_invite(app_user_id: str):
+    """
+    Meghívja az Elite előfizetőt: 1x használatos, 48 órán belül lejáró
+    linket generál. Ezt hívja Lovable, amikor valaki Elite-re fizet elő.
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
+        return {"error": "Telegram nincs konfigurálva"}
+    try:
+        expire_ts = int(time.time()) + 48 * 3600  # 48 óra
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/createChatInviteLink",
+            json={
+                "chat_id": TELEGRAM_CHANNEL,
+                "expire_date": expire_ts,
+                "member_limit": 1,
+                "name": f"elite-{app_user_id[:8]}",
+            },
+            timeout=10,
+        )
+        result = r.json()
+        invite_link = result.get("result", {}).get("invite_link")
+        if not invite_link:
+            return {"error": "Nem sikerült linket generálni", "detail": result}
+
+        sb = get_sb()
+        sb.table("telegram_invites").insert({
+            "app_user_id":  app_user_id,
+            "invite_link":  invite_link,
+            "used":         False,
+        }).execute()
+        return {"invite_link": invite_link, "expires_at": expire_ts}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/telegram/revoke-access")
+def telegram_revoke_access(app_user_id: str):
+    """
+    Kirúgja az adott előfizetőt a Telegram csoportból, amikor lemondja
+    az Elite előfizetést vagy lejár a fizetése. Ezt hívja Lovable a
+    Stripe "subscription cancelled/expired" eseményénél.
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
+        return {"error": "Telegram nincs konfigurálva"}
+    try:
+        sb = get_sb()
+        res = sb.table("telegram_members").select("*").eq(
+            "app_user_id", app_user_id).order("joined_at", desc=True).limit(1).execute()
+        if not res.data:
+            return {"error": "Nincs ismert Telegram-tagság ehhez a felhasználóhoz"}
+
+        telegram_user_id = res.data[0].get("telegram_user_id")
+
+        # Kirúgás, majd azonnali "unban", hogy később egy új meghívóval
+        # újra tudjon csatlakozni, ha újra előfizet.
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/banChatMember",
+            json={"chat_id": TELEGRAM_CHANNEL, "user_id": telegram_user_id},
+            timeout=10,
+        )
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/unbanChatMember",
+            json={"chat_id": TELEGRAM_CHANNEL, "user_id": telegram_user_id, "only_if_banned": True},
+            timeout=10,
+        )
+        sb.table("telegram_members").delete().eq("app_user_id", app_user_id).execute()
+        return {"status": "removed", "telegram_user_id": telegram_user_id}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """
+    Ide küldi a Telegram a csoport-eseményeket (ki lépett be melyik
+    meghívó linkkel). Ebből tudjuk meg, melyik Telegram-fiók tartozik
+    melyik előfizetőhöz - enélkül nem tudnánk kit kirúgni lemondáskor.
+    """
+    try:
+        update = await request.json()
+        chat_member_update = update.get("chat_member")
+        if not chat_member_update:
+            return {"ok": True}
+
+        new_member = chat_member_update.get("new_chat_member", {})
+        status     = new_member.get("status")
+        invite_link_obj = chat_member_update.get("invite_link", {}) or {}
+        used_link  = invite_link_obj.get("invite_link")
+        telegram_user_id = new_member.get("user", {}).get("id")
+
+        if status == "member" and used_link and telegram_user_id:
+            sb = get_sb()
+            invite_res = sb.table("telegram_invites").select("*").eq(
+                "invite_link", used_link).eq("used", False).limit(1).execute()
+            if invite_res.data:
+                app_user_id = invite_res.data[0]["app_user_id"]
+                sb.table("telegram_invites").update({"used": True}).eq(
+                    "invite_link", used_link).execute()
+                sb.table("telegram_members").upsert({
+                    "app_user_id":      app_user_id,
+                    "telegram_user_id": telegram_user_id,
+                }, on_conflict="app_user_id").execute()
+        return {"ok": True}
+    except Exception as e:
+        log.error(f"Telegram webhook hiba: {e}")
+        return {"ok": True}
+# ────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/bankroll")
 def bankroll():
