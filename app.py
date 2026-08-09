@@ -12,7 +12,7 @@ VAGY: ezt töltsd fel app.py névvel a GitHub-ra.
 --- MÓDOSÍTVA: modell-nevek anonimizálva a nyilvános API válaszokban ---
 """
 
-import os, sys, json, logging, requests, time, threading
+import os, sys, json, logging, requests, time, threading, functools
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -56,6 +56,42 @@ def football_api(endpoint: str, params: dict = {}) -> dict:
         )
         return r.json()
     except: return {}
+
+# ─── ÚJ: EGYSZERŰ MEMÓRIA-CACHE A KÜLSŐ API HÍVÁSOKHOZ ────────────────────────
+# Ha egyszerre sok felhasználó nézi ugyanazt a meccset, nem akarjuk minden
+# egyes oldalbetöltésnél újra lehívni ugyanazt a külső API végpontot -
+# ehelyett egy rövid ideig (a TTL alatt) a memóriában tárolt választ adjuk
+# vissza mindenkinek. Egyszerű, de hatékony megoldás egyetlen Railway
+# instance mellett (jelenleg 1 replica fut).
+_endpoint_cache = {}
+_endpoint_cache_lock = threading.Lock()
+
+def cached_call(key: str, ttl_seconds: int, fn, *args, **kwargs):
+    now = time.time()
+    with _endpoint_cache_lock:
+        cached = _endpoint_cache.get(key)
+        if cached and (now - cached["ts"]) < ttl_seconds:
+            return cached["data"]
+    result = fn(*args, **kwargs)
+    with _endpoint_cache_lock:
+        _endpoint_cache[key] = {"data": result, "ts": now}
+    return result
+
+def simple_cache(ttl_seconds: int):
+    """
+    Dekorátor a nehezebb (külső API-t hívó) végpontokra. Ha sok
+    felhasználó egyszerre kéri le ugyanazt a meccset, a TTL alatt
+    mindenki ugyanazt a cache-elt választ kapja - nem hívjuk le
+    feleslegesen sokszor ugyanazt a külső API végpontot.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            key = f"{fn.__name__}:{args}:{sorted(kwargs.items())}"
+            return cached_call(key, ttl_seconds, fn, *args, **kwargs)
+        return wrapper
+    return decorator
+# ────────────────────────────────────────────────────────────────────────────
 
 # ─── ÚJ: ÉLŐ ESEMÉNYEK ÉS RÉSZLETES STATISZTIKA FELDOLGOZÁSA ──────────────────
 _STAT_KEY_MAP = {
@@ -470,6 +506,7 @@ def tip_history(days: int = 30):
         return {"error": str(e)}
 
 @app.get("/api/match/{fixture_id}")
+@simple_cache(30)
 def match_detail(fixture_id: int):
     try:
         sb     = get_sb()
@@ -504,6 +541,7 @@ def match_detail(fixture_id: int):
             "fixture_id": fixture_id,
             "fixture":    fix,
             "venue":      venue,
+            "round":      fix.get("league", {}).get("round"),
             "home_logo":  teams.get("home",{}).get("logo",""),
             "away_logo":  teams.get("away",{}).get("logo",""),
             "odds":       odds_list,
@@ -512,7 +550,148 @@ def match_detail(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
+# ─── ÚJ: JÁTÉKOS SZINTŰ MECCS-STATISZTIKA ("Meccs embere") ────────────────────
+@app.get("/api/match/{fixture_id}/player-stats")
+@simple_cache(120)
+def match_player_stats(fixture_id: int):
+    """
+    Játékosonkénti meccs-statisztika (értékelés, lövések, kulcspassz,
+    párharcok, driblizés). Csak lezárt vagy éppen zajló meccsnél elérhető.
+    """
+    try:
+        data = football_api("fixtures/players", {"fixture": fixture_id})
+        response = data.get("response", [])
+        if not response:
+            return {"fixture_id": fixture_id, "available": False, "teams": []}
+
+        teams = []
+        rated_players = []
+        for team_block in response:
+            team_name = team_block.get("team", {}).get("name", "")
+            players = []
+            for p in team_block.get("players", []):
+                player_info = p.get("player", {}) or {}
+                stats_list  = p.get("statistics") or [{}]
+                s           = stats_list[0] or {}
+                games    = s.get("games", {}) or {}
+                shots    = s.get("shots", {}) or {}
+                passes   = s.get("passes", {}) or {}
+                duels    = s.get("duels", {}) or {}
+                dribbles = s.get("dribbles", {}) or {}
+
+                rating = None
+                try:
+                    rating = float(games.get("rating")) if games.get("rating") else None
+                except Exception:
+                    rating = None
+
+                entry = {
+                    "name":             player_info.get("name", ""),
+                    "position":         games.get("position"),
+                    "minutes":          games.get("minutes"),
+                    "rating":           rating,
+                    "shots_total":      shots.get("total"),
+                    "shots_on":         shots.get("on"),
+                    "key_passes":       passes.get("key"),
+                    "duels_won":        duels.get("won"),
+                    "dribbles_success": dribbles.get("success"),
+                }
+                players.append(entry)
+                if rating:
+                    rated_players.append({"team": team_name, **entry})
+            teams.append({"team": team_name, "players": players})
+
+        man_of_the_match = None
+        if rated_players:
+            man_of_the_match = max(rated_players, key=lambda x: x["rating"] or 0)
+
+        return {
+            "fixture_id":        fixture_id,
+            "available":         True,
+            "teams":             teams,
+            "man_of_the_match":  man_of_the_match,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ─── ÚJ: LIGA GÓLLÖVŐ / GÓLPASSZ LISTA ────────────────────────────────────────
+@app.get("/api/match/{fixture_id}/league-stats")
+@simple_cache(21600)
+def match_league_stats(fixture_id: int):
+    """
+    A meccs ligájának góllövő- és gólpassz-listája (top 5), plusz a
+    forduló száma - jó kiegészítés a Standings fül mellé.
+    """
+    try:
+        fix_data = football_api("fixtures", {"id": fixture_id})
+        if not fix_data.get("response"):
+            return {"error": "Not found"}
+        fix       = fix_data["response"][0]
+        league_id = fix.get("league", {}).get("id")
+        season    = fix.get("league", {}).get("season")
+        round_info = fix.get("league", {}).get("round")
+        if not league_id or not season:
+            return {"error": "Missing league/season"}
+
+        scorers_data = football_api("players/topscorers", {"league": league_id, "season": season})
+        assists_data = football_api("players/topassists", {"league": league_id, "season": season})
+
+        def parse_top(data, goals_key):
+            out = []
+            for item in data.get("response", [])[:5]:
+                player = item.get("player", {}) or {}
+                stats  = (item.get("statistics") or [{}])[0] or {}
+                goals_obj = stats.get("goals", {}) or {}
+                team = (stats.get("team", {}) or {}).get("name")
+                out.append({
+                    "player": player.get("name"),
+                    "team":   team,
+                    "value":  goals_obj.get(goals_key),
+                })
+            return out
+
+        return {
+            "fixture_id":  fixture_id,
+            "round":       round_info,
+            "top_scorers": parse_top(scorers_data, "total"),
+            "top_assists": parse_top(assists_data, "assists"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ─── ÚJ: PIACI KONSZENZUS ÖSSZEVETÉS (API-Football saját predikciója) ─────────
+@app.get("/api/match/{fixture_id}/market-consensus")
+@simple_cache(21600)
+def match_market_consensus(fixture_id: int):
+    """
+    Az API-Football saját, piaci alapú predikciója (%-os esély és
+    tanács) - ez NEM a mi AI-nk, hanem egy külső referenciapont, amivel
+    összevethető a saját elemzésünk hitelesség-erősítés céljából.
+    """
+    try:
+        data = football_api("predictions", {"fixture": fixture_id})
+        response = data.get("response", [])
+        if not response:
+            return {"fixture_id": fixture_id, "available": False}
+        pred    = response[0].get("predictions", {}) or {}
+        percent = pred.get("percent", {}) or {}
+        winner  = pred.get("winner", {}) or {}
+        return {
+            "fixture_id":       fixture_id,
+            "available":        True,
+            "market_percent": {
+                "home": percent.get("home"),
+                "draw": percent.get("draw"),
+                "away": percent.get("away"),
+            },
+            "market_advice":    pred.get("advice"),
+            "market_favorite":  winner.get("name"),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.get("/api/match/{fixture_id}/odds")
+@simple_cache(60)
 def match_odds(fixture_id: int):
     data = football_api("odds", {"fixture": fixture_id})
     bookmakers, best_h, best_d, best_a = [], 0.0, 0.0, 0.0
@@ -548,6 +727,7 @@ def match_odds(fixture_id: int):
 
 # ─── ÚJ: CSAPAT SZEZON-STATISZTIKA VÉGPONT ────────────────────────────────────
 @app.get("/api/match/{fixture_id}/team-stats")
+@simple_cache(21600)
 def match_team_stats(fixture_id: int):
     """
     Mindkét csapat teljes szezonos statisztikája: gólátlag hazai/vendég
@@ -574,6 +754,7 @@ def match_team_stats(fixture_id: int):
 
 # ─── ÚJ: RÉSZLETES SÉRÜLÉSEK/ELTILTÁSOK VÉGPONT ───────────────────────────────
 @app.get("/api/match/{fixture_id}/injuries")
+@simple_cache(21600)
 def match_injuries(fixture_id: int):
     """
     Név szerinti sérült/eltiltott játékos lista mindkét csapatnál,
@@ -596,6 +777,7 @@ def match_injuries(fixture_id: int):
         return {"error": str(e)}
 
 @app.get("/api/match/{fixture_id}/h2h")
+@simple_cache(86400)
 def match_h2h(fixture_id: int):
     fix_data = football_api("fixtures", {"id": fixture_id})
     if not fix_data.get("response"):
@@ -646,6 +828,7 @@ def match_h2h(fixture_id: int):
 
 # ─── ÚJ: STATISZTIKÁK VÉGPONT (korábban hiányzott!) ───────────────────────────
 @app.get("/api/match/{fixture_id}/stats")
+@simple_cache(20)
 def match_stats(fixture_id: int):
     """
     xG, forma, csapat-erő és egyéb bővített statisztikák egy meccshez.
@@ -709,6 +892,7 @@ def match_stats(fixture_id: int):
 
 # ─── ÚJ: KEZDŐCSAPAT (LINEUP) VÉGPONT (korábban hiányzott!) ───────────────────
 @app.get("/api/match/{fixture_id}/lineup")
+@simple_cache(300)
 def match_lineup(fixture_id: int):
     try:
         data = football_api("fixtures/lineups", {"fixture": fixture_id})
@@ -748,6 +932,7 @@ def match_lineup(fixture_id: int):
 
 # ─── ÚJ: LIGA TABELLA VÉGPONT (korábban hiányzott!) ───────────────────────────
 @app.get("/api/match/{fixture_id}/standings")
+@simple_cache(3600)
 def match_standings(fixture_id: int):
     try:
         fix_data = football_api("fixtures", {"id": fixture_id})
@@ -785,6 +970,7 @@ def match_standings(fixture_id: int):
         return {"error": str(e)}
 
 @app.get("/api/live/fixtures")
+@simple_cache(15)
 def live_fixtures():
     data = football_api("fixtures", {"live": "all"})
     fixtures = []
@@ -845,6 +1031,7 @@ def bankroll():
         return {"error": str(e)}
 
 @app.get("/api/arbitrage")
+@simple_cache(300)
 def arbitrage(date_str: str = ""):
     target = date_str or date.today().strftime("%Y-%m-%d")
     data   = football_api("fixtures", {"date": target, "status": "NS"})
