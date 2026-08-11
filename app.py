@@ -372,6 +372,24 @@ def sanitize_analysis_for_public(analysis: dict) -> dict:
     if "raw_probs" in safe:
         safe["raw_probs"] = _coerce_to_dict(safe["raw_probs"])
 
+    # ÚJ: védőkorlát a value_edge mezőre. Egy korábbi, régi adatokban jelenlévő
+    # skálázási hiba (frakció vs. százalék keveredés a két elemző motor között)
+    # miatt néhány régi tippnél irreálisan magas (pl. 14580%) érték szerepelhet.
+    # Ha a value_edge 300%-nál magasabb (ami matematikailag szinte biztosan hibás
+    # adat, nem valós edge), jelezzük gyanúsként ahelyett, hogy a nyers, megtévesztő
+    # számot mutatnánk.
+    VALUE_EDGE_SANITY_LIMIT = 300  # % - e fölött valószínűleg hibás/régi adat
+    if "value_edge" in safe:
+        try:
+            ve = float(safe.get("value_edge") or 0)
+            if ve > VALUE_EDGE_SANITY_LIMIT:
+                safe["value_edge_suspect"] = True
+                safe["value_edge_raw"] = ve  # megőrizzük a nyers értéket debughoz
+            else:
+                safe["value_edge_suspect"] = False
+        except (TypeError, ValueError):
+            pass
+
     # Sosem küldjük ki nyers formában ezeket a mezőket, ha esetleg bekerülnének:
     for forbidden_key in ("model_weights", "model_source_code", "internal_notes"):
         safe.pop(forbidden_key, None)
