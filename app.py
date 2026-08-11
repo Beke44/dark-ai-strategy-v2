@@ -440,39 +440,59 @@ def public_stats():
     except Exception as e:
         return {"error": str(e)}
 
-# ─── ÚJ: CSAPATLOGÓ-KIEGÉSZÍTÉS TIPPLISTÁKHOZ ─────────────────────────────────
-# A `tips` tábla sorai nem tartalmaznak logó-mezőt (csak csapatnevet), ezért
-# a tipplista-végpontok (recent/by-status/today) korábban nem tudtak logót
-# visszaadni. Ez a segédfüggvény fixture_id alapján, HOSSZAN (24 óra) cache-elve
-# adja vissza a logókat - egy csapat logója gyakorlatilag sosem változik,
-# így ez nem terheli feleslegesen az API-kvótát.
-@simple_cache(86400)
-def _get_fixture_logos(fixture_id: int):
+# ─── ÚJ: CSAPATLOGÓ + PONTOS VÉGEREDMÉNY KIEGÉSZÍTÉS TIPPLISTÁKHOZ ─────────────
+# A `tips` tábla sorai nem tartalmaznak logó- vagy gólszám-mezőt (csak
+# csapatnevet és Win/Lost eredményt), ezért a tipplista-végpontok
+# (recent/by-status/today) korábban nem tudtak sem logót, sem pontos
+# végeredményt (pl. "1:1") visszaadni. Ez a segédfüggvény fixture_id
+# alapján, 1 órás cache-eléssel adja vissza mindkettőt EGY API hívásból -
+# lezárt meccseknél a gólszám úgysem változik, így ez a cache-idő biztonságos.
+@simple_cache(3600)
+def _get_fixture_details(fixture_id: int):
     try:
         data = football_api("fixtures", {"id": fixture_id})
         fix  = (data.get("response") or [{}])[0] if data.get("response") else {}
         teams = fix.get("teams", {}) if fix else {}
+        goals = fix.get("goals", {}) if fix else {}
+        status = fix.get("fixture", {}).get("status", {}).get("short", "") if fix else ""
         return {
-            "home_logo": teams.get("home", {}).get("logo", ""),
-            "away_logo": teams.get("away", {}).get("logo", ""),
+            "home_logo":  teams.get("home", {}).get("logo", ""),
+            "away_logo":  teams.get("away", {}).get("logo", ""),
+            "home_score": goals.get("home"),
+            "away_score": goals.get("away"),
+            "match_status": status,
         }
     except Exception:
-        return {"home_logo": "", "away_logo": ""}
+        return {"home_logo": "", "away_logo": "", "home_score": None, "away_score": None, "match_status": ""}
 
 
 def _enrich_tips_with_logos(tips_list):
-    """Minden tipphez hozzáadja a home_logo/away_logo mezőt, fixture_id alapján."""
+    """
+    Minden tipphez hozzáadja a home_logo/away_logo mezőt, és lezárt
+    (Win/Lost) tippeknél a pontos végeredményt (home_score/away_score) is,
+    fixture_id alapján.
+    """
     for t in tips_list:
         fid = t.get("fixture_id")
         if fid:
-            logos = _get_fixture_logos(fid)
-            t["home_logo"] = logos.get("home_logo", "")
-            t["away_logo"] = logos.get("away_logo", "")
+            details = _get_fixture_details(fid)
+            t["home_logo"]  = details.get("home_logo", "")
+            t["away_logo"]  = details.get("away_logo", "")
+            if t.get("result_status") in ("Win", "Lost"):
+                t["home_score"] = details.get("home_score")
+                t["away_score"] = details.get("away_score")
+            else:
+                t["home_score"] = None
+                t["away_score"] = None
         else:
-            t["home_logo"] = ""
-            t["away_logo"] = ""
+            t["home_logo"]  = ""
+            t["away_logo"]  = ""
+            t["home_score"] = None
+            t["away_score"] = None
     return tips_list
 # ────────────────────────────────────────────────────────────────────────────
+
+
 
 @app.get("/api/tips/recent")
 def recent_tips(limit: int = 20, status: str = "all"):
