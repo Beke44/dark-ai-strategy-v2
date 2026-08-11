@@ -484,11 +484,29 @@ def _get_fixture_details(fixture_id: int):
         return {"home_logo": "", "away_logo": "", "home_score": None, "away_score": None, "match_status": ""}
 
 
+VALUE_EDGE_SANITY_LIMIT = 300  # % - e fölött valószínűleg hibás/régi adat
+
+def _flag_suspect_value_edge(t: dict):
+    """Ugyanaz a védőkorlát, mint sanitize_analysis_for_public()-ben,
+    de a tips-lista végpontokra alkalmazva (recent/by-status/today) -
+    ezek közvetlenül a `tips` táblából olvasnak, nem mennek át azon."""
+    try:
+        ve = float(t.get("value_edge") or 0)
+        if ve > VALUE_EDGE_SANITY_LIMIT:
+            t["value_edge_suspect"] = True
+            t["value_edge_raw"] = ve
+        else:
+            t["value_edge_suspect"] = False
+    except (TypeError, ValueError):
+        pass
+    return t
+
+
 def _enrich_tips_with_logos(tips_list):
     """
-    Minden tipphez hozzáadja a home_logo/away_logo mezőt, és lezárt
-    (Win/Lost) tippeknél a pontos végeredményt (home_score/away_score) is,
-    fixture_id alapján.
+    Minden tipphez hozzáadja a home_logo/away_logo mezőt, lezárt
+    (Win/Lost) tippeknél a pontos végeredményt (home_score/away_score),
+    és a value_edge gyanús-jelzést is, fixture_id alapján.
     """
     for t in tips_list:
         fid = t.get("fixture_id")
@@ -507,6 +525,7 @@ def _enrich_tips_with_logos(tips_list):
             t["away_logo"]  = ""
             t["home_score"] = None
             t["away_score"] = None
+        _flag_suspect_value_edge(t)  # ÚJ: value_edge védőkorlát itt is
     return tips_list
 # ────────────────────────────────────────────────────────────────────────────
 
