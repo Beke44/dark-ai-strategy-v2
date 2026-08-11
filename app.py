@@ -440,6 +440,40 @@ def public_stats():
     except Exception as e:
         return {"error": str(e)}
 
+# ─── ÚJ: CSAPATLOGÓ-KIEGÉSZÍTÉS TIPPLISTÁKHOZ ─────────────────────────────────
+# A `tips` tábla sorai nem tartalmaznak logó-mezőt (csak csapatnevet), ezért
+# a tipplista-végpontok (recent/by-status/today) korábban nem tudtak logót
+# visszaadni. Ez a segédfüggvény fixture_id alapján, HOSSZAN (24 óra) cache-elve
+# adja vissza a logókat - egy csapat logója gyakorlatilag sosem változik,
+# így ez nem terheli feleslegesen az API-kvótát.
+@simple_cache(86400)
+def _get_fixture_logos(fixture_id: int):
+    try:
+        data = football_api("fixtures", {"id": fixture_id})
+        fix  = (data.get("response") or [{}])[0] if data.get("response") else {}
+        teams = fix.get("teams", {}) if fix else {}
+        return {
+            "home_logo": teams.get("home", {}).get("logo", ""),
+            "away_logo": teams.get("away", {}).get("logo", ""),
+        }
+    except Exception:
+        return {"home_logo": "", "away_logo": ""}
+
+
+def _enrich_tips_with_logos(tips_list):
+    """Minden tipphez hozzáadja a home_logo/away_logo mezőt, fixture_id alapján."""
+    for t in tips_list:
+        fid = t.get("fixture_id")
+        if fid:
+            logos = _get_fixture_logos(fid)
+            t["home_logo"] = logos.get("home_logo", "")
+            t["away_logo"] = logos.get("away_logo", "")
+        else:
+            t["home_logo"] = ""
+            t["away_logo"] = ""
+    return tips_list
+# ────────────────────────────────────────────────────────────────────────────
+
 @app.get("/api/tips/recent")
 def recent_tips(limit: int = 20, status: str = "all"):
     try:
@@ -457,6 +491,7 @@ def recent_tips(limit: int = 20, status: str = "all"):
             k = f"{t.get('home_team','')}_{t.get('away_team','')}_{str(t.get('created_at',''))[:10]}"
             if k not in seen:
                 seen.add(k); unique.append(t)
+        unique = _enrich_tips_with_logos(unique)  # ÚJ: logók hozzáadása
         return {"tips": unique, "count": len(unique)}
     except Exception as e:
         return {"error": str(e)}
@@ -477,6 +512,7 @@ def tips_by_status(status: str = "pending", limit: int = 30):
             k = f"{t.get('home_team','')}_{t.get('away_team','')}_{str(t.get('created_at',''))[:10]}"
             if k not in seen:
                 seen.add(k); unique.append(t)
+        unique = _enrich_tips_with_logos(unique)  # ÚJ: logók hozzáadása
         return {"status": status, "count": len(unique), "tips": unique}
     except Exception as e:
         return {"error": str(e)}
@@ -494,6 +530,8 @@ def tips_today():
                    and t.get("result_status") not in ["Win","Lost"]]
         closed   = [t for t in all_tips
                    if t.get("result_status") in ["Win","Lost"]][:20]
+        pending  = _enrich_tips_with_logos(pending)  # ÚJ: logók hozzáadása
+        closed   = _enrich_tips_with_logos(closed)   # ÚJ: logók hozzáadása
         return {
             "date":          today,
             "pending":       pending,
@@ -546,6 +584,18 @@ def tip_history(days: int = 30):
 @simple_cache(30)
 def match_detail(fixture_id: int):
     try:
+        # MÓDOSÍTVA: mindig lekérjük az élő fixture-adatot (csapatnevek,
+        # logók, helyszín, forduló) - korábban ez csak akkor történt meg,
+        # ha NEM volt Supabase-elemzés, ezért a mentett tippeknél hiányoztak
+        # a home_logo/away_logo mezők a válaszból.
+        fix_data = football_api("fixtures", {"id": fixture_id})
+        fix   = (fix_data.get("response") or [{}])[0] if fix_data.get("response") else {}
+        teams = fix.get("teams", {}) if fix else {}
+        venue = fix.get("fixture", {}).get("venue", {}) if fix else {}
+        home_logo = teams.get("home", {}).get("logo", "")
+        away_logo = teams.get("away", {}).get("logo", "")
+        round_info = fix.get("league", {}).get("round") if fix else None
+
         sb     = get_sb()
         result = sb.table("match_analyses").select("*").eq(
             "fixture_id", fixture_id).order(
@@ -554,14 +604,20 @@ def match_detail(fixture_id: int):
             analysis = result.data[0]
             # --- MÓDOSÍTVA: modellnevek anonimizálva, mielőtt kimegy ---
             analysis = sanitize_analysis_for_public(analysis)
-            return {"fixture_id": fixture_id, "analysis": analysis, "source": "supabase"}
-        # Live API fallback
-        fix_data = football_api("fixtures", {"id": fixture_id})
-        if not fix_data.get("response"):
+            return {
+                "fixture_id": fixture_id,
+                "analysis":   analysis,
+                "fixture":    fix,
+                "venue":      venue,
+                "round":      round_info,
+                "home_logo":  home_logo,
+                "away_logo":  away_logo,
+                "source":     "supabase",
+            }
+
+        # Ha nincs Supabase-elemzés, csak élő adat (odds is bekerül)
+        if not fix:
             return {"error": "Not found"}
-        fix   = fix_data["response"][0]
-        teams = fix.get("teams", {})
-        venue = fix.get("fixture", {}).get("venue", {})
         odds_data = football_api("odds", {"fixture": fixture_id})
         odds_list = []
         for bk in odds_data.get("response",[{}])[0].get("bookmakers",[])[:5]:
@@ -578,9 +634,9 @@ def match_detail(fixture_id: int):
             "fixture_id": fixture_id,
             "fixture":    fix,
             "venue":      venue,
-            "round":      fix.get("league", {}).get("round"),
-            "home_logo":  teams.get("home",{}).get("logo",""),
-            "away_logo":  teams.get("away",{}).get("logo",""),
+            "round":      round_info,
+            "home_logo":  home_logo,
+            "away_logo":  away_logo,
             "odds":       odds_list,
             "source":     "live_api"
         }
