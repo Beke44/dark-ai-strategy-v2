@@ -823,6 +823,83 @@ def match_injuries(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
+# ─── ÚJ: KÖNNYŰ SÉRÜLÉS-ÖSSZEGZŐ (tippkártyához, gyors ikon-jelzéshez) ────────
+@app.get("/api/match/{fixture_id}/injury-summary")
+@simple_cache(21600)
+def match_injury_summary(fixture_id: int):
+    """
+    Tömör összegzés a tippkártyákhoz - csak annyi, amennyi egy
+    figyelmeztető ikonhoz/tooltiphez kell (nem a teljes lista).
+    Ugyanazt a nyers API hívást használja, mint a /injuries végpont,
+    de csak a lényeget adja vissza, hogy a lista-nézeteknél gyors legyen.
+    """
+    try:
+        data = football_api("injuries", {"fixture": fixture_id})
+        response = data.get("response", [])
+        seen = set()
+        home_count = 0
+        away_count = 0
+        top_names = []
+        for item in response:
+            player_info = item.get("player", {}) or {}
+            name   = player_info.get("name", "")
+            team   = (item.get("team", {}) or {}).get("name", "")
+            reason = player_info.get("reason", "")
+            dedupe_key = (name, team, reason)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            if len(top_names) < 3:
+                top_names.append(f"{name} ({team})")
+        total = len(seen)
+        return {
+            "fixture_id":  fixture_id,
+            "count":       total,
+            "has_injuries": total > 0,
+            "preview":     top_names,  # max 3 név gyors tooltip-hez
+        }
+    except Exception as e:
+        return {"error": str(e)}
+# ────────────────────────────────────────────────────────────────────────────
+
+# ─── ÚJ: "HASONLÓ TIPPEK TELJESÍTMÉNYE" KOHORSZ-STATISZTIKA ───────────────────
+@app.get("/api/tips/cohort-stats")
+@simple_cache(600)
+def tips_cohort_stats(prediction: str, odds_min: float = 0, odds_max: float = 999):
+    """
+    Visszaadja, hogy a múltban hasonló jellemzőjű (azonos predikció-típus,
+    hasonló odds-sáv) lezárt tippek hogyan teljesítettek. Ezt a frontend
+    a tippkártyán "Hasonló tippek eddigi teljesítménye" blokkhoz hívja.
+    Példa: GET /api/tips/cohort-stats?prediction=draw&odds_min=3&odds_max=4
+    """
+    try:
+        all_tips = fetch_all_tips(status_filter=["Win", "Lost"])
+        cohort = [
+            t for t in all_tips
+            if t.get("prediction") == prediction
+            and odds_min <= float(t.get("odds") or 0) <= odds_max
+        ]
+        if not cohort:
+            return {
+                "prediction": prediction, "odds_min": odds_min, "odds_max": odds_max,
+                "count": 0, "win_rate": None, "message": "Nincs elég korábbi adat ehhez a kategóriához."
+            }
+        wins = sum(1 for t in cohort if t.get("result_status") == "Win")
+        profit = sum(float(t.get("profit") or 0) for t in cohort)
+        return {
+            "prediction": prediction,
+            "odds_min":   odds_min,
+            "odds_max":   odds_max,
+            "count":      len(cohort),
+            "wins":       wins,
+            "losses":     len(cohort) - wins,
+            "win_rate":   round(wins / len(cohort) * 100, 1),
+            "avg_profit": round(profit / len(cohort), 1),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+# ────────────────────────────────────────────────────────────────────────────
+
 @app.get("/api/match/{fixture_id}/h2h")
 @simple_cache(86400)
 def match_h2h(fixture_id: int):
