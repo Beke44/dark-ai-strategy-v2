@@ -1311,15 +1311,15 @@ def build_daily_summary_message(target_date: str) -> str:
     r = _summarize_tip_group(recommended)
     n = _summarize_tip_group(normal)
 
-    msg  = f"📊 <b>Napi összesítő – {target_date}</b>\n\n"
-    msg += f"💎 <b>Tét ajánlásos tippek</b> ({r['total']} db)\n"
-    msg += f"  ✅ {r['wins']} győzelem / ❌ {r['losses']} vesztés (win rate: {r['win_rate']}%)\n"
-    msg += f"  💰 Összprofit: {r['profit']:+,.0f} coin\n\n"
-    msg += f"📋 <b>Tét ajánlás nélküli tippek</b> ({n['total']} db)\n"
-    msg += f"  ✅ {n['wins']} győzelem / ❌ {n['losses']} vesztés (win rate: {n['win_rate']}%)\n"
-    msg += f"  💰 Összprofit: {n['profit']:+,.0f} coin\n\n"
-    msg += f"<i>Ennek a napnak a részletes élő értesítései mostantól törlésre kerülnek "
-    msg += f"a csatornából ({TELEGRAM_RETENTION_DAYS} napos megőrzési szabály).</i>"
+    msg  = f"📊 <b>Daily Summary – {target_date}</b>\n\n"
+    msg += f"💎 <b>Stake-recommended tips</b> ({r['total']})\n"
+    msg += f"  ✅ {r['wins']} won / ❌ {r['losses']} lost (win rate: {r['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {r['profit']:+,.0f} coin\n\n"
+    msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
+    msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {n['profit']:+,.0f} coin\n\n"
+    msg += f"<i>This day's detailed live alerts will now be removed "
+    msg += f"from the channel ({TELEGRAM_RETENTION_DAYS}-day retention policy).</i>"
     return msg
 
 
@@ -1346,13 +1346,13 @@ def send_yesterday_recap():
     r = _summarize_tip_group(recommended)
     n = _summarize_tip_group(normal)
 
-    msg  = f"🌅 <b>Tegnapi eredmények – {yesterday}</b>\n\n"
-    msg += f"💎 <b>Tét ajánlásos tippek</b> ({r['total']} db)\n"
-    msg += f"  ✅ {r['wins']} győzelem / ❌ {r['losses']} vesztés (win rate: {r['win_rate']}%)\n"
-    msg += f"  💰 Összprofit: {r['profit']:+,.0f} coin\n\n"
-    msg += f"📋 <b>Tét ajánlás nélküli tippek</b> ({n['total']} db)\n"
-    msg += f"  ✅ {n['wins']} győzelem / ❌ {n['losses']} vesztés (win rate: {n['win_rate']}%)\n"
-    msg += f"  💰 Összprofit: {n['profit']:+,.0f} coin"
+    msg  = f"🌅 <b>Yesterday's Results – {yesterday}</b>\n\n"
+    msg += f"💎 <b>Stake-recommended tips</b> ({r['total']})\n"
+    msg += f"  ✅ {r['wins']} won / ❌ {r['losses']} lost (win rate: {r['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {r['profit']:+,.0f} coin\n\n"
+    msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
+    msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {n['profit']:+,.0f} coin"
     send_telegram(msg, category="yesterday_recap")
 
 
@@ -1378,7 +1378,7 @@ def check_and_notify_new_tips():
     if not new_tips:
         return
 
-    pred_hu_map = {"home": "Hazai", "draw": "Döntetlen", "away": "Vendég"}
+    pred_en_map = {"home": "Home", "draw": "Draw", "away": "Away"}
 
     def _tip_ids(tips_list):
         return [t.get("id") for t in tips_list]
@@ -1396,34 +1396,34 @@ def check_and_notify_new_tips():
     if len(new_tips) <= NOTIFY_INDIVIDUAL_THRESHOLD:
         for tip in new_tips:
             try:
-                pred_hu = pred_hu_map.get(tip.get("prediction"), tip.get("prediction", ""))
-                msg  = f"🆕 <b>ÚJ TIPP</b>\n"
+                pred_en = pred_en_map.get(tip.get("prediction"), tip.get("prediction", ""))
+                msg  = f"🆕 <b>NEW TIP</b>\n"
                 msg += f"🏟️ {tip.get('home_team','')} vs {tip.get('away_team','')}\n"
-                msg += f"🏆 {tip.get('league','') or 'Ismeretlen liga'}\n"
-                msg += f"🎯 Tipp: <b>{pred_hu}</b> @ {float(tip.get('odds') or 0):.2f}\n"
-                msg += f"🤖 AI bizalom: {float(tip.get('confidence') or 0):.0f}%"
+                msg += f"🏆 {tip.get('league','') or 'Unknown league'}\n"
+                msg += f"🎯 Tip: <b>{pred_en}</b> @ {float(tip.get('odds') or 0):.2f}\n"
+                msg += f"🤖 AI confidence: {float(tip.get('confidence') or 0):.0f}%"
                 value_edge = float(tip.get('value_edge') or 0)
                 if value_edge:
                     msg += f" | Value: +{value_edge:.1f}%"
                 if tip.get('smart_pro'):
-                    msg += f"\n💎 <b>TÉT AJÁNLÁSOS</b> — {float(tip.get('rec_stake') or 0):,.0f} coin"
+                    msg += f"\n💎 <b>STAKE RECOMMENDED</b> — {float(tip.get('rec_stake') or 0):,.0f} coin"
                 send_telegram(msg, category="new_tip", fixture_id=tip.get("fixture_id"))
             except Exception as e:
-                log.error(f"Új tipp értesítés hiba (id={tip.get('id')}): {e}")
+                log.error(f"New tip alert error (id={tip.get('id')}): {e}")
         _mark_notified(new_tips)
     else:
-        # Sok új tipp egyszerre -> egyetlen összefoglaló üzenet
+        # Many new tips at once -> single digest message
         try:
-            msg = f"🆕 <b>{len(new_tips)} ÚJ TIPP</b> készült\n\n"
+            msg = f"🆕 <b>{len(new_tips)} NEW TIPS</b> available\n\n"
             smart_pro_tips = [t for t in new_tips if t.get('smart_pro')]
-            for tip in new_tips[:15]:  # max 15 sort írunk ki részletesen, hogy ne legyen óriási üzenet
-                pred_hu = pred_hu_map.get(tip.get("prediction"), tip.get("prediction", ""))
+            for tip in new_tips[:15]:  # only list up to 15 in detail, to keep the message reasonable
+                pred_en = pred_en_map.get(tip.get("prediction"), tip.get("prediction", ""))
                 marker = "💎 " if tip.get('smart_pro') else "• "
-                msg += f"{marker}{tip.get('home_team','')} vs {tip.get('away_team','')} — {pred_hu} @ {float(tip.get('odds') or 0):.2f}\n"
+                msg += f"{marker}{tip.get('home_team','')} vs {tip.get('away_team','')} — {pred_en} @ {float(tip.get('odds') or 0):.2f}\n"
             if len(new_tips) > 15:
-                msg += f"\n… és még {len(new_tips) - 15} további tipp."
+                msg += f"\n… and {len(new_tips) - 15} more tips."
             if smart_pro_tips:
-                msg += f"\n\n💎 <b>{len(smart_pro_tips)} tét ajánlásos tipp</b> található köztük."
+                msg += f"\n\n💎 <b>{len(smart_pro_tips)} stake-recommended tips</b> among these."
             send_telegram(msg, category="new_tip_digest")
         except Exception as e:
             log.error(f"Összesített új tipp értesítés hiba: {e}")
@@ -1723,4 +1723,3 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
-
