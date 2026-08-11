@@ -1358,11 +1358,12 @@ def send_yesterday_recap():
 
 def check_and_notify_new_tips():
     """
-    ÚJ: megnézi, van-e olyan tipp a Supabase-ben, amiről még nem
-    küldtünk Telegram-értesítést (telegram_notified = false), és ha
-    van, elküldi róla az üzenetet, majd megjelöli bejelentettként.
-    Ez a "🆕 ÚJ TIPP" azonnali értesítés - szerver-oldali, megbízható,
-    nem függ attól, hogy a helyi géped éppen fut-e.
+    Megnézi, van-e olyan tipp a Supabase-ben, amiről még nem küldtünk
+    Telegram-értesítést (telegram_notified = false). Ha 1-3 új tipp
+    van, mindegyikről külön, részletes üzenetet küld. Ha ennél TÖBB
+    (pl. egy nagyobb elemzési kör egyszerre 15+ meccset mentett),
+    EGYETLEN összefoglaló üzenetbe gyűjti őket - így egyszerre sok új
+    tipp sem árasztja el a csatornát külön-külön üzenetekkel.
     """
     try:
         sb = get_sb()
@@ -1374,29 +1375,59 @@ def check_and_notify_new_tips():
         log.error(f"Új tipp ellenőrzés hiba: {e}")
         return
 
-    for tip in new_tips:
+    if not new_tips:
+        return
+
+    pred_hu_map = {"home": "Hazai", "draw": "Döntetlen", "away": "Vendég"}
+
+    def _tip_ids(tips_list):
+        return [t.get("id") for t in tips_list]
+
+    def _mark_notified(tips_list):
+        ids = _tip_ids(tips_list)
+        if ids:
+            try:
+                sb.table("tips").update({"telegram_notified": True}).in_("id", ids).execute()
+            except Exception as e:
+                log.error(f"Bejelentettként jelölés hiba: {e}")
+
+    NOTIFY_INDIVIDUAL_THRESHOLD = 3  # ennél kevesebb új tippnél még egyenként küldünk
+
+    if len(new_tips) <= NOTIFY_INDIVIDUAL_THRESHOLD:
+        for tip in new_tips:
+            try:
+                pred_hu = pred_hu_map.get(tip.get("prediction"), tip.get("prediction", ""))
+                msg  = f"🆕 <b>ÚJ TIPP</b>\n"
+                msg += f"🏟️ {tip.get('home_team','')} vs {tip.get('away_team','')}\n"
+                msg += f"🏆 {tip.get('league','') or 'Ismeretlen liga'}\n"
+                msg += f"🎯 Tipp: <b>{pred_hu}</b> @ {float(tip.get('odds') or 0):.2f}\n"
+                msg += f"🤖 AI bizalom: {float(tip.get('confidence') or 0):.0f}%"
+                value_edge = float(tip.get('value_edge') or 0)
+                if value_edge:
+                    msg += f" | Value: +{value_edge:.1f}%"
+                if tip.get('smart_pro'):
+                    msg += f"\n💎 <b>TÉT AJÁNLÁSOS</b> — {float(tip.get('rec_stake') or 0):,.0f} coin"
+                send_telegram(msg, category="new_tip", fixture_id=tip.get("fixture_id"))
+            except Exception as e:
+                log.error(f"Új tipp értesítés hiba (id={tip.get('id')}): {e}")
+        _mark_notified(new_tips)
+    else:
+        # Sok új tipp egyszerre -> egyetlen összefoglaló üzenet
         try:
-            pred_hu = {"home": "Hazai", "draw": "Döntetlen", "away": "Vendég"}.get(
-                tip.get("prediction"), tip.get("prediction", "")
-            )
-            msg  = f"🆕 <b>ÚJ TIPP</b>\n"
-            msg += f"🏟️ {tip.get('home_team','')} vs {tip.get('away_team','')}\n"
-            msg += f"🏆 {tip.get('league','') or 'Ismeretlen liga'}\n"
-            msg += f"🎯 Tipp: <b>{pred_hu}</b> @ {float(tip.get('odds') or 0):.2f}\n"
-            msg += f"🤖 AI bizalom: {float(tip.get('confidence') or 0):.0f}%"
-            value_edge = float(tip.get('value_edge') or 0)
-            if value_edge:
-                msg += f" | Value: +{value_edge:.1f}%"
-            if tip.get('smart_pro'):
-                msg += f"\n💎 <b>TÉT AJÁNLÁSOS</b> — {float(tip.get('rec_stake') or 0):,.0f} coin"
-
-            send_telegram(msg, category="new_tip", fixture_id=tip.get("fixture_id"))
-
-            sb.table("tips").update({"telegram_notified": True}).eq(
-                "id", tip.get("id")
-            ).execute()
+            msg = f"🆕 <b>{len(new_tips)} ÚJ TIPP</b> készült\n\n"
+            smart_pro_tips = [t for t in new_tips if t.get('smart_pro')]
+            for tip in new_tips[:15]:  # max 15 sort írunk ki részletesen, hogy ne legyen óriási üzenet
+                pred_hu = pred_hu_map.get(tip.get("prediction"), tip.get("prediction", ""))
+                marker = "💎 " if tip.get('smart_pro') else "• "
+                msg += f"{marker}{tip.get('home_team','')} vs {tip.get('away_team','')} — {pred_hu} @ {float(tip.get('odds') or 0):.2f}\n"
+            if len(new_tips) > 15:
+                msg += f"\n… és még {len(new_tips) - 15} további tipp."
+            if smart_pro_tips:
+                msg += f"\n\n💎 <b>{len(smart_pro_tips)} tét ajánlásos tipp</b> található köztük."
+            send_telegram(msg, category="new_tip_digest")
         except Exception as e:
-            log.error(f"Új tipp értesítés hiba (id={tip.get('id')}): {e}")
+            log.error(f"Összesített új tipp értesítés hiba: {e}")
+        _mark_notified(new_tips)
 
 
 def delete_old_telegram_messages(older_than_date: str):
@@ -1692,3 +1723,4 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+
