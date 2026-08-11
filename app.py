@@ -57,6 +57,29 @@ def football_api(endpoint: str, params: dict = {}) -> dict:
         return r.json()
     except: return {}
 
+# ─── ÚJ: LAPOZOTT SUPABASE LEKÉRDEZÉS ──────────────────────────────────────────
+# A Supabase/PostgREST alapértelmezetten 1000 sorra vágja a válaszokat, ha
+# nincs explicit .range() megadva - emiatt a korábbi statisztikák (win rate,
+# ROI, profit) hiányosan, csak az első 1000 lezárt tippből számoltak, holott
+# 2000+ tipp van a táblában. Ez a segédfüggvény lapozva lekéri AZ ÖSSZES sort.
+def fetch_all_tips(status_filter=None, page_size: int = 1000, max_pages: int = 20):
+    sb = get_sb()
+    all_rows = []
+    start = 0
+    for _ in range(max_pages):
+        q = sb.table("tips").select("*")
+        if status_filter:
+            q = q.in_("result_status", status_filter)
+        q = q.range(start, start + page_size - 1)
+        result = q.execute()
+        page = result.data or []
+        all_rows.extend(page)
+        if len(page) < page_size:
+            break
+        start += page_size
+    return all_rows
+# ────────────────────────────────────────────────────────────────────────────
+
 # ─── ÚJ: EGYSZERŰ MEMÓRIA-CACHE A KÜLSŐ API HÍVÁSOKHOZ ────────────────────────
 # Ha egyszerre sok felhasználó nézi ugyanazt a meccset, nem akarjuk minden
 # egyes oldalbetöltésnél újra lehívni ugyanazt a külső API végpontot -
@@ -380,10 +403,9 @@ def health():
 @app.get("/api/stats/public")
 def public_stats():
     try:
-        sb     = get_sb()
-        result = sb.table("tips").select("*").in_(
-            "result_status", ["Win","Lost"]).execute()
-        tips   = result.data or []
+        # MÓDOSÍTVA: lapozott lekérdezés, hogy 1000-nél több lezárt tippet is
+        # helyesen összesítsen (korábban csendben levágta 1000-nél).
+        tips   = fetch_all_tips(status_filter=["Win","Lost"])
         if not tips:
             return {"total": 0, "wins": 0, "win_rate": 0, "roi": 0}
         wins   = sum(1 for t in tips if t.get("result_status") == "Win")
@@ -485,10 +507,25 @@ def tips_today():
 @app.get("/api/tips/history")
 def tip_history(days: int = 30):
     try:
-        sb     = get_sb()
-        result = sb.table("tips").select("*").order(
-            "created_at", desc=True).limit(days * 15).execute()
-        tips   = result.data or []
+        # MÓDOSÍTVA: dátum szerinti szűrés + lapozás, hogy egy nap ALATTI
+        # összes tipp bekerüljön (korábban limit(days*15) sok tippet
+        # levághatott egy-egy forgalmasabb napon).
+        cutoff = (date.today() - timedelta(days=days)).isoformat()
+        sb = get_sb()
+        all_rows = []
+        start = 0
+        page_size = 1000
+        for _ in range(20):
+            q = sb.table("tips").select("*").gte(
+                "created_at", cutoff).order("created_at", desc=True
+            ).range(start, start + page_size - 1)
+            result = q.execute()
+            page = result.data or []
+            all_rows.extend(page)
+            if len(page) < page_size:
+                break
+            start += page_size
+        tips   = all_rows
         daily  = {}
         for t in tips:
             d = str(t.get("created_at",""))[:10]
@@ -1127,10 +1164,8 @@ async def telegram_webhook(request: Request):
 @app.get("/api/bankroll")
 def bankroll():
     try:
-        sb     = get_sb()
-        result = sb.table("tips").select("*").in_(
-            "result_status",["Win","Lost"]).execute()
-        tips   = result.data or []
+        # MÓDOSÍTVA: lapozott lekérdezés, ugyanaz az ok, mint a /api/stats/public-nál.
+        tips   = fetch_all_tips(status_filter=["Win","Lost"])
         wins   = sum(1 for t in tips if t.get("result_status")=="Win")
         profit = sum(float(t.get("profit") or 0) for t in tips)
         stake  = sum(float(t.get("stake")  or 0) for t in tips)
@@ -1208,11 +1243,15 @@ _monitor_status = {
 _sent_alerts = set()
 _last_scores = {}
 _last_critical_alert = {}  # fixture_id -> utolsó kritikus cash-out üzenet ideje (timestamp)
-_last_daily_maintenance_date = None  # dátum, amikor utoljára lefutott a napi Telegram-karbantartás
+_last_daily_maintenance_date = None  # dátum, amikor utoljára lefutott a napi Telegram-karbantartás (törlés)
+_last_daily_recap_date = None        # dátum, amikor utoljára lefutott a "tegnapi eredmények" összesítő
+_last_new_tip_check = 0              # timestamp, mikor néztük utoljára az új tippeket
 
 # Meccsenkénti minimum időköz (másodperc) a kritikus cash-out javaslatok között,
 # hogy egy hektikus meccs se árassza el a Telegram csatornát.
 CRITICAL_ALERT_COOLDOWN_SEC = 300  # 5 perc
+
+NEW_TIP_CHECK_INTERVAL_SEC = 120  # ennyi másodpercenként nézzük meg, van-e új, be nem jelentett tipp
 
 TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram üzenetek
 
@@ -1232,16 +1271,32 @@ def _is_recommended_tip(t: dict) -> bool:
         return False
 
 
+def _summarize_tip_group(tips_subset):
+    """Közös összesítő logika: darabszám, győzelem/vesztés, win rate, profit."""
+    closed = [t for t in tips_subset if t.get("result_status") in ("Win", "Lost")]
+    wins = sum(1 for t in closed if t.get("result_status") == "Win")
+    profit = sum(float(t.get("profit") or 0) for t in closed)
+    return {
+        "total": len(tips_subset),
+        "closed": len(closed),
+        "wins": wins,
+        "losses": len(closed) - wins,
+        "win_rate": round(wins / max(len(closed), 1) * 100, 1),
+        "profit": round(profit, 0),
+    }
+
+
 def build_daily_summary_message(target_date: str) -> str:
     """
     Összeállít egy napi összesítő Telegram üzenetet a megadott napra
     (YYYY-MM-DD), külön szekcióval a tét ajánlásos és a tét ajánlás
-    nélküli tippekre.
+    nélküli tippekre. Ezt a törlés ELŐTT küldjük ki, arra a napra,
+    aminek az üzenetei épp most válnak régivé.
     """
     try:
-        sb = get_sb()
-        result = sb.table("tips").select("*").execute()
-        all_tips = result.data or []
+        # MÓDOSÍTVA: lapozott lekérdezés (lásd fetch_all_tips), hogy ez se
+        # essen bele az 1000-es alapértelmezett Supabase limitbe.
+        all_tips = fetch_all_tips()
     except Exception as e:
         log.error(f"Napi összesítő - tips lekérés hiba: {e}")
         return None
@@ -1250,24 +1305,11 @@ def build_daily_summary_message(target_date: str) -> str:
     if not day_tips:
         return None
 
-    def summarize(tips_subset):
-        closed = [t for t in tips_subset if t.get("result_status") in ("Win", "Lost")]
-        wins = sum(1 for t in closed if t.get("result_status") == "Win")
-        profit = sum(float(t.get("profit") or 0) for t in closed)
-        return {
-            "total": len(tips_subset),
-            "closed": len(closed),
-            "wins": wins,
-            "losses": len(closed) - wins,
-            "win_rate": round(wins / max(len(closed), 1) * 100, 1),
-            "profit": round(profit, 0),
-        }
-
     recommended = [t for t in day_tips if _is_recommended_tip(t)]
     normal      = [t for t in day_tips if not _is_recommended_tip(t)]
 
-    r = summarize(recommended)
-    n = summarize(normal)
+    r = _summarize_tip_group(recommended)
+    n = _summarize_tip_group(normal)
 
     msg  = f"📊 <b>Napi összesítő – {target_date}</b>\n\n"
     msg += f"💎 <b>Tét ajánlásos tippek</b> ({r['total']} db)\n"
@@ -1279,6 +1321,82 @@ def build_daily_summary_message(target_date: str) -> str:
     msg += f"<i>Ennek a napnak a részletes élő értesítései mostantól törlésre kerülnek "
     msg += f"a csatornából ({TELEGRAM_RETENTION_DAYS} napos megőrzési szabály).</i>"
     return msg
+
+
+def send_yesterday_recap():
+    """
+    ÚJ: minden nap egyszer elküldi a TEGNAPI nap eredményeit
+    (tét ajánlásos / nem-ajánlásos bontásban) - ez FÜGGETLEN a
+    2 napos törlési logikától, csak informatív, semmit nem töröl.
+    """
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    try:
+        all_tips = fetch_all_tips()
+    except Exception as e:
+        log.error(f"Tegnapi összesítő - tips lekérés hiba: {e}")
+        return
+
+    day_tips = [t for t in all_tips if str(t.get("created_at", ""))[:10] == yesterday]
+    if not day_tips:
+        return  # nem küldünk üres üzenetet, ha tegnap nem volt tipp
+
+    recommended = [t for t in day_tips if _is_recommended_tip(t)]
+    normal      = [t for t in day_tips if not _is_recommended_tip(t)]
+
+    r = _summarize_tip_group(recommended)
+    n = _summarize_tip_group(normal)
+
+    msg  = f"🌅 <b>Tegnapi eredmények – {yesterday}</b>\n\n"
+    msg += f"💎 <b>Tét ajánlásos tippek</b> ({r['total']} db)\n"
+    msg += f"  ✅ {r['wins']} győzelem / ❌ {r['losses']} vesztés (win rate: {r['win_rate']}%)\n"
+    msg += f"  💰 Összprofit: {r['profit']:+,.0f} coin\n\n"
+    msg += f"📋 <b>Tét ajánlás nélküli tippek</b> ({n['total']} db)\n"
+    msg += f"  ✅ {n['wins']} győzelem / ❌ {n['losses']} vesztés (win rate: {n['win_rate']}%)\n"
+    msg += f"  💰 Összprofit: {n['profit']:+,.0f} coin"
+    send_telegram(msg, category="yesterday_recap")
+
+
+def check_and_notify_new_tips():
+    """
+    ÚJ: megnézi, van-e olyan tipp a Supabase-ben, amiről még nem
+    küldtünk Telegram-értesítést (telegram_notified = false), és ha
+    van, elküldi róla az üzenetet, majd megjelöli bejelentettként.
+    Ez a "🆕 ÚJ TIPP" azonnali értesítés - szerver-oldali, megbízható,
+    nem függ attól, hogy a helyi géped éppen fut-e.
+    """
+    try:
+        sb = get_sb()
+        result = sb.table("tips").select("*").eq(
+            "telegram_notified", False
+        ).order("created_at", desc=False).limit(50).execute()
+        new_tips = result.data or []
+    except Exception as e:
+        log.error(f"Új tipp ellenőrzés hiba: {e}")
+        return
+
+    for tip in new_tips:
+        try:
+            pred_hu = {"home": "Hazai", "draw": "Döntetlen", "away": "Vendég"}.get(
+                tip.get("prediction"), tip.get("prediction", "")
+            )
+            msg  = f"🆕 <b>ÚJ TIPP</b>\n"
+            msg += f"🏟️ {tip.get('home_team','')} vs {tip.get('away_team','')}\n"
+            msg += f"🏆 {tip.get('league','') or 'Ismeretlen liga'}\n"
+            msg += f"🎯 Tipp: <b>{pred_hu}</b> @ {float(tip.get('odds') or 0):.2f}\n"
+            msg += f"🤖 AI bizalom: {float(tip.get('confidence') or 0):.0f}%"
+            value_edge = float(tip.get('value_edge') or 0)
+            if value_edge:
+                msg += f" | Value: +{value_edge:.1f}%"
+            if tip.get('smart_pro'):
+                msg += f"\n💎 <b>TÉT AJÁNLÁSOS</b> — {float(tip.get('rec_stake') or 0):,.0f} coin"
+
+            send_telegram(msg, category="new_tip", fixture_id=tip.get("fixture_id"))
+
+            sb.table("tips").update({"telegram_notified": True}).eq(
+                "id", tip.get("id")
+            ).execute()
+        except Exception as e:
+            log.error(f"Új tipp értesítés hiba (id={tip.get('id')}): {e}")
 
 
 def delete_old_telegram_messages(older_than_date: str):
@@ -1402,6 +1520,27 @@ def live_monitor_loop():
                 except Exception as _maint_e:
                     log.error(f"Napi Telegram karbantartás hiba: {_maint_e}")
                 _last_daily_maintenance_date = today_iso
+            # ────────────────────────────────────────────────────────────────────────
+
+            # ─── ÚJ: "Tegnapi eredmények" napi összesítő (nem töröl semmit) ───────────
+            global _last_daily_recap_date
+            if _last_daily_recap_date != today_iso:
+                try:
+                    send_yesterday_recap()
+                except Exception as _recap_e:
+                    log.error(f"Tegnapi összesítő hiba: {_recap_e}")
+                _last_daily_recap_date = today_iso
+            # ────────────────────────────────────────────────────────────────────────
+
+            # ─── ÚJ: "Új tipp" azonnali értesítés ellenőrzése ─────────────────────────
+            global _last_new_tip_check
+            now_ts = time.time()
+            if now_ts - _last_new_tip_check >= NEW_TIP_CHECK_INTERVAL_SEC:
+                try:
+                    check_and_notify_new_tips()
+                except Exception as _tip_e:
+                    log.error(f"Új tipp értesítés ellenőrzés hiba: {_tip_e}")
+                _last_new_tip_check = now_ts
             # ────────────────────────────────────────────────────────────────────────
 
             today_tips  = get_todays_tips_from_supabase()
