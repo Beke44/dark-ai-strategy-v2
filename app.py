@@ -12,7 +12,7 @@ VAGY: ezt töltsd fel app.py névvel a GitHub-ra.
 --- MÓDOSÍTVA: modell-nevek anonimizálva a nyilvános API válaszokban ---
 """
 
-import os, sys, json, logging, requests, time, threading, functools
+import os, sys, json, logging, requests, time, threading, functools, hmac
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -20,10 +20,12 @@ from dotenv import load_dotenv
 # FastAPI
 from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 load_dotenv()
 
 FOOTBALL_API_KEY = os.getenv("FOOTBALL_API_KEY", "")
+RAILWAY_API_KEY  = os.getenv("RAILWAY_API_KEY", "")
 SUPABASE_URL     = "https://kvduiliabfncikvesmza.supabase.co"
 SUPABASE_KEY     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2ZHVpbGlhYmZuY2lrdmVzbXphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3ODEyMjYsImV4cCI6MjEwMTM1NzIyNn0.9tbY11h4nFDe7IAxqcdcNcZXxcs1r1w9096A2ZlKL_0"
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -40,8 +42,34 @@ log = logging.getLogger(__name__)
 app = FastAPI(title="Dark AI Strategy API", version="4.1")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    allow_origins=[
+        "https://darkaistrategy.com",
+        "https://www.darkaistrategy.com",
+    ],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Accept", "Content-Type", "X-Railway-API-Key"],
 )
+
+PUBLIC_PATHS = {"/", "/api/health", "/api/stats/public"}
+
+@app.middleware("http")
+async def require_server_api_key(request: Request, call_next):
+    """A fizetős Railway API kizárólag szerver–szerver kulccsal érhető el."""
+    path = request.url.path.rstrip("/") or "/"
+    if (
+        request.method == "OPTIONS"
+        or path in PUBLIC_PATHS
+        or not path.startswith("/api/")
+    ):
+        return await call_next(request)
+
+    supplied = request.headers.get("x-railway-api-key", "")
+    if not RAILWAY_API_KEY:
+        log.error("RAILWAY_API_KEY nincs beállítva; védett kérés elutasítva.")
+        return JSONResponse({"error": "service_not_configured"}, status_code=503)
+    if not supplied or not hmac.compare_digest(supplied, RAILWAY_API_KEY):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 def get_sb():
     from supabase import create_client
