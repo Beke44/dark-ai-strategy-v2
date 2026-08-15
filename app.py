@@ -1,15 +1,15 @@
 """
-Dark AI Strategy â Railway Worker
+Dark AI Strategy – Railway Worker
 ===================================
 Ez fut Railway-en 24/7:
-- FastAPI backend (API vĂŠgpontok)
-- Live Monitor hĂĄttĂŠrszĂĄlon (ĂŠlĹ meccsek figyelĂŠse)
-- Automatikus ĂşjraindĂ­tĂĄs hiba esetĂŠn
+- FastAPI backend (API végpontok)
+- Live Monitor háttérszálon (élő meccsek figyelése)
+- Automatikus újraindítás hiba esetén
 
-Railway-en ez az app.py helyett fut ha Procfile-t hasznĂĄlunk.
-VAGY: ezt tĂśltsd fel app.py nĂŠvvel a GitHub-ra.
+Railway-en ez az app.py helyett fut ha Procfile-t használunk.
+VAGY: ezt töltsd fel app.py névvel a GitHub-ra.
 
---- MĂDOSĂTVA: modell-nevek anonimizĂĄlva a nyilvĂĄnos API vĂĄlaszokban ---
+--- MÓDOSÍTVA: modell-nevek anonimizálva a nyilvános API válaszokban ---
 """
 
 import os, sys, json, logging, requests, time, threading, functools, hmac, html
@@ -39,7 +39,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# âââ FastAPI ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── FastAPI ──────────────────────────────────────────────────────────────────
 app = FastAPI(title="Dark AI Strategy API", version="4.1")
 app.add_middleware(
     CORSMiddleware,
@@ -55,7 +55,7 @@ PUBLIC_PATHS = {"/", "/api/health", "/api/stats/public"}
 
 @app.middleware("http")
 async def require_server_api_key(request: Request, call_next):
-    """A fizetĹs Railway API kizĂĄrĂłlag szerverâszerver kulccsal ĂŠrhetĹ el."""
+    """A fizetős Railway API kizárólag szerver–szerver kulccsal érhető el."""
     path = request.url.path.rstrip("/") or "/"
     if (
         request.method == "OPTIONS"
@@ -66,7 +66,7 @@ async def require_server_api_key(request: Request, call_next):
 
     supplied = request.headers.get("x-railway-api-key", "")
     if not RAILWAY_API_KEY:
-        log.error("RAILWAY_API_KEY nincs beĂĄllĂ­tva; vĂŠdett kĂŠrĂŠs elutasĂ­tva.")
+        log.error("RAILWAY_API_KEY nincs beállítva; védett kérés elutasítva.")
         return JSONResponse({"error": "service_not_configured"}, status_code=503)
     if not supplied or not hmac.compare_digest(supplied, RAILWAY_API_KEY):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -86,11 +86,11 @@ def football_api(endpoint: str, params: dict = {}) -> dict:
         return r.json()
     except: return {}
 
-# âââ ĂJ: LAPOZOTT SUPABASE LEKĂRDEZĂS ââââââââââââââââââââââââââââââââââââââââââ
-# A Supabase/PostgREST alapĂŠrtelmezetten 1000 sorra vĂĄgja a vĂĄlaszokat, ha
-# nincs explicit .range() megadva - emiatt a korĂĄbbi statisztikĂĄk (win rate,
-# ROI, profit) hiĂĄnyosan, csak az elsĹ 1000 lezĂĄrt tippbĹl szĂĄmoltak, holott
-# 2000+ tipp van a tĂĄblĂĄban. Ez a segĂŠdfĂźggvĂŠny lapozva lekĂŠri AZ ĂSSZES sort.
+# ─── ÚJ: LAPOZOTT SUPABASE LEKÉRDEZÉS ──────────────────────────────────────────
+# A Supabase/PostgREST alapértelmezetten 1000 sorra vágja a válaszokat, ha
+# nincs explicit .range() megadva - emiatt a korábbi statisztikák (win rate,
+# ROI, profit) hiányosan, csak az első 1000 lezárt tippből számoltak, holott
+# 2000+ tipp van a táblában. Ez a segédfüggvény lapozva lekéri AZ ÖSSZES sort.
 def fetch_all_tips(status_filter=None, page_size: int = 1000, max_pages: int = 20):
     sb = get_sb()
     all_rows = []
@@ -107,13 +107,13 @@ def fetch_all_tips(status_filter=None, page_size: int = 1000, max_pages: int = 2
             break
         start += page_size
     return all_rows
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
-# âââ ĂJ: EGYSZERĹ° MEMĂRIA-CACHE A KĂLSĹ API HĂVĂSOKHOZ ââââââââââââââââââââââââ
-# Ha egyszerre sok felhasznĂĄlĂł nĂŠzi ugyanazt a meccset, nem akarjuk minden
-# egyes oldalbetĂśltĂŠsnĂŠl Ăşjra lehĂ­vni ugyanazt a kĂźlsĹ API vĂŠgpontot -
-# ehelyett egy rĂśvid ideig (a TTL alatt) a memĂłriĂĄban tĂĄrolt vĂĄlaszt adjuk
-# vissza mindenkinek. EgyszerĹą, de hatĂŠkony megoldĂĄs egyetlen Railway
+# ─── ÚJ: EGYSZERŰ MEMÓRIA-CACHE A KÜLSŐ API HÍVÁSOKHOZ ────────────────────────
+# Ha egyszerre sok felhasználó nézi ugyanazt a meccset, nem akarjuk minden
+# egyes oldalbetöltésnél újra lehívni ugyanazt a külső API végpontot -
+# ehelyett egy rövid ideig (a TTL alatt) a memóriában tárolt választ adjuk
+# vissza mindenkinek. Egyszerű, de hatékony megoldás egyetlen Railway
 # instance mellett (jelenleg 1 replica fut).
 _endpoint_cache = {}
 _endpoint_cache_lock = threading.Lock()
@@ -131,10 +131,10 @@ def cached_call(key: str, ttl_seconds: int, fn, *args, **kwargs):
 
 def simple_cache(ttl_seconds: int):
     """
-    DekorĂĄtor a nehezebb (kĂźlsĹ API-t hĂ­vĂł) vĂŠgpontokra. Ha sok
-    felhasznĂĄlĂł egyszerre kĂŠri le ugyanazt a meccset, a TTL alatt
-    mindenki ugyanazt a cache-elt vĂĄlaszt kapja - nem hĂ­vjuk le
-    feleslegesen sokszor ugyanazt a kĂźlsĹ API vĂŠgpontot.
+    Dekorátor a nehezebb (külső API-t hívó) végpontokra. Ha sok
+    felhasználó egyszerre kéri le ugyanazt a meccset, a TTL alatt
+    mindenki ugyanazt a cache-elt választ kapja - nem hívjuk le
+    feleslegesen sokszor ugyanazt a külső API végpontot.
     """
     def decorator(fn):
         @functools.wraps(fn)
@@ -143,9 +143,9 @@ def simple_cache(ttl_seconds: int):
             return cached_call(key, ttl_seconds, fn, *args, **kwargs)
         return wrapper
     return decorator
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
-# âââ ĂJ: ĂLĹ ESEMĂNYEK ĂS RĂSZLETES STATISZTIKA FELDOLGOZĂSA ââââââââââââââââââ
+# ─── ÚJ: ÉLŐ ESEMÉNYEK ÉS RÉSZLETES STATISZTIKA FELDOLGOZÁSA ──────────────────
 _STAT_KEY_MAP = {
     "Shots on Goal":     "shots_on_target",
     "Shots off Goal":    "shots_off_target",
@@ -167,8 +167,8 @@ _STAT_KEY_MAP = {
 }
 
 def get_live_stats_parsed(fixture_id: int):
-    """CsapatonkĂŠnti, tisztĂĄn feldolgozott ĂŠlĹ statisztika (lĂśvĂŠsek,
-    birtoklĂĄs, szĂśglet, lapok stb.) - nem a nyers API vĂĄlasz."""
+    """Csapatonkénti, tisztán feldolgozott élő statisztika (lövések,
+    birtoklás, szöglet, lapok stb.) - nem a nyers API válasz."""
     data = football_api("fixtures/statistics", {"fixture": fixture_id})
     response = data.get("response", [])
     if not response:
@@ -186,7 +186,7 @@ def get_live_stats_parsed(fixture_id: int):
 
 
 def get_match_events(fixture_id: int):
-    """EsemĂŠny-naplĂł: gĂłlok, lapok, cserĂŠk percenkĂŠnti bontĂĄsban."""
+    """Esemény-napló: gólok, lapok, cserék percenkénti bontásban."""
     data = football_api("fixtures/events", {"fixture": fixture_id})
     events = []
     for ev in data.get("response", []):
@@ -199,17 +199,17 @@ def get_match_events(fixture_id: int):
             "player":       ev.get("player", {}).get("name", ""),
             "assist":       (ev.get("assist") or {}).get("name"),
         })
-    # RĂŠgi esemĂŠnyektĹl az Ăşjabbak felĂŠ rendezve (percek szerint)
+    # Régi eseményektől az újabbak felé rendezve (percek szerint)
     events.sort(key=lambda e: (e.get("minute") or 0, e.get("extra_minute") or 0))
     return events
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
-# âââ ĂJ: CSAPAT SZEZON-STATISZTIKA (mĂŠlyebb, mint a puszta tabella) âââââââââââ
+# ─── ÚJ: CSAPAT SZEZON-STATISZTIKA (mélyebb, mint a puszta tabella) ───────────
 def get_team_season_stats(team_id: int, league_id: int, season) -> dict:
     """
-    Csapat egĂŠsz szezonos statisztikĂĄja: hazai/vendĂŠg gĂłlĂĄtlag,
-    clean sheet szĂĄm, gĂłlnĂŠlkĂźli meccsek szĂĄma, legjobb gyĹzelmi sorozat,
-    jelenlegi forma-string. Sokkal mĂŠlyebb, mint a tabella egy sora.
+    Csapat egész szezonos statisztikája: hazai/vendég gólátlag,
+    clean sheet szám, gólnélküli meccsek száma, legjobb győzelmi sorozat,
+    jelenlegi forma-string. Sokkal mélyebb, mint a tabella egy sora.
     """
     data = football_api("teams/statistics", {
         "team": team_id, "league": league_id, "season": season
@@ -246,16 +246,16 @@ def get_team_season_stats(team_id: int, league_id: int, season) -> dict:
         "biggest_win_home":        (biggest.get("wins", {}) or {}).get("home"),
         "biggest_win_away":        (biggest.get("wins", {}) or {}).get("away"),
     }
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
-# âââ ĂJ: ODDS-MOZGĂS KĂVETĂSE ("ĂŠles pĂŠnz" jelzĂŠs) ââââââââââââââââââââââââââââ
+# ─── ÚJ: ODDS-MOZGÁS KÖVETÉSE ("éles pénz" jelzés) ────────────────────────────
 def record_and_get_odds_movement(fixture_id: int, current_odds: dict):
     """
-    Minden lekĂŠrdezĂŠskor elmenti a jelenlegi legjobb odds-okat egy
-    historikus (insert-only) Supabase tĂĄblĂĄba, majd Ăśsszeveti a
-    legkorĂĄbban rĂśgzĂ­tett ("nyitĂł") ĂŠrtĂŠkkel. Ha egy oldal odds-a
-    jelentĹsen (>=7%) csĂśkkent a nyitĂł Ăłta, az klasszikus jele annak,
-    hogy nagyobb tĂŠtek ĂŠrkeztek arra az oldalra ("ĂŠles pĂŠnz").
+    Minden lekérdezéskor elmenti a jelenlegi legjobb odds-okat egy
+    historikus (insert-only) Supabase táblába, majd összeveti a
+    legkorábban rögzített ("nyitó") értékkel. Ha egy oldal odds-a
+    jelentősen (>=7%) csökkent a nyitó óta, az klasszikus jele annak,
+    hogy nagyobb tétek érkeztek arra az oldalra ("éles pénz").
     """
     try:
         sb = get_sb()
@@ -286,7 +286,7 @@ def record_and_get_odds_movement(fixture_id: int, current_odds: dict):
                       "change_pct": pct_change(opening.get("away_odd"), current_odds.get("away"))},
         }
 
-        SHARP_THRESHOLD = -7.0  # % - ennĂŠl nagyobb odds-csĂśkkenĂŠs szĂĄmĂ­t jelzĂŠsnek
+        SHARP_THRESHOLD = -7.0  # % - ennél nagyobb odds-csökkenés számít jelzésnek
         sharp_signal = None
         for side in ("home", "draw", "away"):
             chg = movement[side]["change_pct"]
@@ -298,10 +298,10 @@ def record_and_get_odds_movement(fixture_id: int, current_odds: dict):
     except Exception as e:
         log.error(f"Odds movement hiba: {e}")
         return None
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
 def _tg(value) -> str:
-    """FelhasznĂĄlĂłi/API-szĂśveg biztonsĂĄgos Telegram HTML megjelenĂ­tĂŠse."""
+    """Felhasználói/API-szöveg biztonságos Telegram HTML megjelenítése."""
     return html.escape(str(value or ""), quote=True)
 
 
@@ -312,9 +312,9 @@ def send_telegram(
     buttons: list = None,
 ):
     """
-    KĂźld egy Telegram Ăźzenetet, ĂŠs a message_id-t elmenti a Supabase
-    telegram_messages tĂĄblĂĄjĂĄba - ez teszi lehetĹvĂŠ a kĂŠsĹbbi (2 nap
-    utĂĄni) automatikus tĂśrlĂŠst.
+    Küld egy Telegram üzenetet, és a message_id-t elmenti a Supabase
+    telegram_messages táblájába - ez teszi lehetővé a későbbi (2 nap
+    utáni) automatikus törlést.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
         return None
@@ -336,7 +336,7 @@ def send_telegram(
         )
         result = r.json()
         if not r.ok or not result.get("ok"):
-            log.error(f"Telegram kĂźldĂŠsi hiba ({r.status_code}): {result}")
+            log.error(f"Telegram küldési hiba ({r.status_code}): {result}")
             return None
         message_id = result.get("result", {}).get("message_id")
         if message_id:
@@ -355,28 +355,28 @@ def send_telegram(
         log.error(f"Telegram kapcsolat hiba: {e}")
         return None
 
-# âââ ĂJ: MODELL-NĂV ANONIMIZĂLĂS ââââââââââââââââââââââââââââââââââââââââââââââ
-# A belsĹ modellneveket SOHA nem kĂźldjĂźk ki nyilvĂĄnosan (versenytĂĄrs-vĂŠdelem).
-# Ha Ăşj modellt adsz a rendszerhez, itt vedd fel a sajĂĄt belsĹ kulcsnevĂŠt ->
-# megjelenĂ­tendĹ "ĂĄlnevĂŠt".
+# ─── ÚJ: MODELL-NÉV ANONIMIZÁLÁS ──────────────────────────────────────────────
+# A belső modellneveket SOHA nem küldjük ki nyilvánosan (versenytárs-védelem).
+# Ha új modellt adsz a rendszerhez, itt vedd fel a saját belső kulcsnevét ->
+# megjelenítendő "álnevét".
 MODEL_DISPLAY_NAMES = {
-    "monte_carlo":     "SzimulĂĄciĂłs Modell",
+    "monte_carlo":     "Szimulációs Modell",
     "elo":             "Rangsor Modell",
-    "neural_network":  "MĂŠlytanulĂĄsi Modell",
+    "neural_network":  "Mélytanulási Modell",
     "xgboost":         "Statisztikai Modell",
     "form":            "Forma Modell",
-    "h2h":             "EgymĂĄs Elleni Modell",
-    "goal_stats":      "GĂłlstatisztikai Modell",
-    "trust":           "MegbĂ­zhatĂłsĂĄgi Modell",
+    "h2h":             "Egymás Elleni Modell",
+    "goal_stats":      "Gólstatisztikai Modell",
+    "trust":           "Megbízhatósági Modell",
     "meta":            "Meta Modell",
-    "ensemble":        "ĂsszesĂ­tett Modell",
+    "ensemble":        "Összesített Modell",
 }
 
 def _coerce_to_dict(raw):
     """
-    Supabase-bĹl nĂŠha JSON-string formĂĄban jĂśn vissza egy mezĹ
-    (pl. ha mentĂŠskor json.dumps()-szal lett elmentve egy text/jsonb oszlopba).
-    Ez a segĂŠdfĂźggvĂŠny biztonsĂĄgosan dict-tĂŠ alakĂ­tja, akĂĄrmilyen formĂĄban jĂśn.
+    Supabase-ből néha JSON-string formában jön vissza egy mező
+    (pl. ha mentéskor json.dumps()-szal lett elmentve egy text/jsonb oszlopba).
+    Ez a segédfüggvény biztonságosan dict-té alakítja, akármilyen formában jön.
     """
     if isinstance(raw, dict):
         return raw
@@ -391,10 +391,10 @@ def _coerce_to_dict(raw):
 
 def anonymize_model_dict(raw) -> dict:
     """
-    LecserĂŠli a belsĹ modellkulcsokat (pl. 'xgboost', 'elo') semleges,
-    kifelĂŠ mutathatĂł elnevezĂŠsekre (pl. 'Modell 1', 'Modell 2'),
-    vagy a MODEL_DISPLAY_NAMES-ben megadott nĂŠvre, ha van ilyen.
-    Elfogadja dict vagy JSON-string formĂĄban is a bemenetet.
+    Lecseréli a belső modellkulcsokat (pl. 'xgboost', 'elo') semleges,
+    kifelé mutatható elnevezésekre (pl. 'Modell 1', 'Modell 2'),
+    vagy a MODEL_DISPLAY_NAMES-ben megadott névre, ha van ilyen.
+    Elfogadja dict vagy JSON-string formában is a bemenetet.
     """
     raw = _coerce_to_dict(raw)
     result = {}
@@ -410,10 +410,10 @@ def anonymize_model_dict(raw) -> dict:
 
 def sanitize_analysis_for_public(analysis: dict) -> dict:
     """
-    Egy teljes elemzĂŠs-dict-en vĂŠgigmegy, ĂŠs minden olyan mezĹt
-    anonimizĂĄl, ami a belsĹ modellarchitektĂşrĂĄra utalhat.
-    Nem mĂłdosĂ­tja az eredeti dict-et, mĂĄsolattal dolgozik.
-    Kezeli azt az esetet is, ha model_votes/models JSON-stringkĂŠnt jĂśtt Supabase-bĹl.
+    Egy teljes elemzés-dict-en végigmegy, és minden olyan mezőt
+    anonimizál, ami a belső modellarchitektúrára utalhat.
+    Nem módosítja az eredeti dict-et, másolattal dolgozik.
+    Kezeli azt az esetet is, ha model_votes/models JSON-stringként jött Supabase-ből.
     """
     if not isinstance(analysis, dict):
         return analysis
@@ -428,31 +428,31 @@ def sanitize_analysis_for_public(analysis: dict) -> dict:
     if "raw_probs" in safe:
         safe["raw_probs"] = _coerce_to_dict(safe["raw_probs"])
 
-    # ĂJ: vĂŠdĹkorlĂĄt a value_edge mezĹre. Egy korĂĄbbi, rĂŠgi adatokban jelenlĂŠvĹ
-    # skĂĄlĂĄzĂĄsi hiba (frakciĂł vs. szĂĄzalĂŠk keveredĂŠs a kĂŠt elemzĹ motor kĂśzĂśtt)
-    # miatt nĂŠhĂĄny rĂŠgi tippnĂŠl irreĂĄlisan magas (pl. 14580%) ĂŠrtĂŠk szerepelhet.
-    # Ha a value_edge 300%-nĂĄl magasabb (ami matematikailag szinte biztosan hibĂĄs
-    # adat, nem valĂłs edge), jelezzĂźk gyanĂşskĂŠnt ahelyett, hogy a nyers, megtĂŠvesztĹ
-    # szĂĄmot mutatnĂĄnk.
-    VALUE_EDGE_SANITY_LIMIT = 300  # % - e fĂślĂśtt valĂłszĂ­nĹąleg hibĂĄs/rĂŠgi adat
+    # ÚJ: védőkorlát a value_edge mezőre. Egy korábbi, régi adatokban jelenlévő
+    # skálázási hiba (frakció vs. százalék keveredés a két elemző motor között)
+    # miatt néhány régi tippnél irreálisan magas (pl. 14580%) érték szerepelhet.
+    # Ha a value_edge 300%-nál magasabb (ami matematikailag szinte biztosan hibás
+    # adat, nem valós edge), jelezzük gyanúsként ahelyett, hogy a nyers, megtévesztő
+    # számot mutatnánk.
+    VALUE_EDGE_SANITY_LIMIT = 300  # % - e fölött valószínűleg hibás/régi adat
     if "value_edge" in safe:
         try:
             ve = float(safe.get("value_edge") or 0)
             if ve > VALUE_EDGE_SANITY_LIMIT:
                 safe["value_edge_suspect"] = True
-                safe["value_edge_raw"] = ve  # megĹrizzĂźk a nyers ĂŠrtĂŠket debughoz
+                safe["value_edge_raw"] = ve  # megőrizzük a nyers értéket debughoz
             else:
                 safe["value_edge_suspect"] = False
         except (TypeError, ValueError):
             pass
 
-    # Sosem kĂźldjĂźk ki nyers formĂĄban ezeket a mezĹket, ha esetleg bekerĂźlnĂŠnek:
+    # Sosem küldjük ki nyers formában ezeket a mezőket, ha esetleg bekerülnének:
     for forbidden_key in ("model_weights", "model_source_code", "internal_notes"):
         safe.pop(forbidden_key, None)
 
     return safe
 
-# âââ API VĂGPONTOK ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── API VÉGPONTOK ────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -477,8 +477,8 @@ def health():
 @app.get("/api/stats/public")
 def public_stats():
     try:
-        # MĂDOSĂTVA: lapozott lekĂŠrdezĂŠs, hogy 1000-nĂŠl tĂśbb lezĂĄrt tippet is
-        # helyesen ĂśsszesĂ­tsen (korĂĄbban csendben levĂĄgta 1000-nĂŠl).
+        # MÓDOSÍTVA: lapozott lekérdezés, hogy 1000-nél több lezárt tippet is
+        # helyesen összesítsen (korábban csendben levágta 1000-nél).
         tips   = fetch_all_tips(status_filter=["Win","Lost"])
         if not tips:
             return {"total": 0, "wins": 0, "win_rate": 0, "roi": 0}
@@ -514,13 +514,13 @@ def public_stats():
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: CSAPATLOGĂ + PONTOS VĂGEREDMĂNY KIEGĂSZĂTĂS TIPPLISTĂKHOZ âââââââââââââ
-# A `tips` tĂĄbla sorai nem tartalmaznak logĂł- vagy gĂłlszĂĄm-mezĹt (csak
-# csapatnevet ĂŠs Win/Lost eredmĂŠnyt), ezĂŠrt a tipplista-vĂŠgpontok
-# (recent/by-status/today) korĂĄbban nem tudtak sem logĂłt, sem pontos
-# vĂŠgeredmĂŠnyt (pl. "1:1") visszaadni. Ez a segĂŠdfĂźggvĂŠny fixture_id
-# alapjĂĄn, 1 ĂłrĂĄs cache-elĂŠssel adja vissza mindkettĹt EGY API hĂ­vĂĄsbĂłl -
-# lezĂĄrt meccseknĂŠl a gĂłlszĂĄm Ăşgysem vĂĄltozik, Ă­gy ez a cache-idĹ biztonsĂĄgos.
+# ─── ÚJ: CSAPATLOGÓ + PONTOS VÉGEREDMÉNY KIEGÉSZÍTÉS TIPPLISTÁKHOZ ─────────────
+# A `tips` tábla sorai nem tartalmaznak logó- vagy gólszám-mezőt (csak
+# csapatnevet és Win/Lost eredményt), ezért a tipplista-végpontok
+# (recent/by-status/today) korábban nem tudtak sem logót, sem pontos
+# végeredményt (pl. "1:1") visszaadni. Ez a segédfüggvény fixture_id
+# alapján, 1 órás cache-eléssel adja vissza mindkettőt EGY API hívásból -
+# lezárt meccseknél a gólszám úgysem változik, így ez a cache-idő biztonságos.
 @simple_cache(3600)
 def _get_fixture_details(fixture_id: int):
     try:
@@ -540,12 +540,12 @@ def _get_fixture_details(fixture_id: int):
         return {"home_logo": "", "away_logo": "", "home_score": None, "away_score": None, "match_status": ""}
 
 
-VALUE_EDGE_SANITY_LIMIT = 300  # % - e fĂślĂśtt valĂłszĂ­nĹąleg hibĂĄs/rĂŠgi adat
+VALUE_EDGE_SANITY_LIMIT = 300  # % - e fölött valószínűleg hibás/régi adat
 
 def _flag_suspect_value_edge(t: dict):
-    """Ugyanaz a vĂŠdĹkorlĂĄt, mint sanitize_analysis_for_public()-ben,
-    de a tips-lista vĂŠgpontokra alkalmazva (recent/by-status/today) -
-    ezek kĂśzvetlenĂźl a `tips` tĂĄblĂĄbĂłl olvasnak, nem mennek ĂĄt azon."""
+    """Ugyanaz a védőkorlát, mint sanitize_analysis_for_public()-ben,
+    de a tips-lista végpontokra alkalmazva (recent/by-status/today) -
+    ezek közvetlenül a `tips` táblából olvasnak, nem mennek át azon."""
     try:
         ve = float(t.get("value_edge") or 0)
         if ve > VALUE_EDGE_SANITY_LIMIT:
@@ -560,9 +560,9 @@ def _flag_suspect_value_edge(t: dict):
 
 def _enrich_tips_with_logos(tips_list):
     """
-    Minden tipphez hozzĂĄadja a home_logo/away_logo mezĹt, lezĂĄrt
-    (Win/Lost) tippeknĂŠl a pontos vĂŠgeredmĂŠnyt (home_score/away_score),
-    ĂŠs a value_edge gyanĂşs-jelzĂŠst is, fixture_id alapjĂĄn.
+    Minden tipphez hozzáadja a home_logo/away_logo mezőt, lezárt
+    (Win/Lost) tippeknél a pontos végeredményt (home_score/away_score),
+    és a value_edge gyanús-jelzést is, fixture_id alapján.
     """
     for t in tips_list:
         fid = t.get("fixture_id")
@@ -581,9 +581,9 @@ def _enrich_tips_with_logos(tips_list):
             t["away_logo"]  = ""
             t["home_score"] = None
             t["away_score"] = None
-        _flag_suspect_value_edge(t)  # ĂJ: value_edge vĂŠdĹkorlĂĄt itt is
+        _flag_suspect_value_edge(t)  # ÚJ: value_edge védőkorlát itt is
     return tips_list
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
 
 
@@ -598,13 +598,13 @@ def recent_tips(limit: int = 20, status: str = "all"):
             q = q.in_("result_status", ["Win","Lost"])
         result = q.limit(limit).execute()
         tips   = result.data or []
-        # DuplikĂĄciĂł szĹąrĂŠs
+        # Duplikáció szűrés
         seen, unique = set(), []
         for t in tips:
             k = f"{t.get('home_team','')}_{t.get('away_team','')}_{str(t.get('created_at',''))[:10]}"
             if k not in seen:
                 seen.add(k); unique.append(t)
-        unique = _enrich_tips_with_logos(unique)  # ĂJ: logĂłk hozzĂĄadĂĄsa
+        unique = _enrich_tips_with_logos(unique)  # ÚJ: logók hozzáadása
         return {"tips": unique, "count": len(unique)}
     except Exception as e:
         return {"error": str(e)}
@@ -625,7 +625,7 @@ def tips_by_status(status: str = "pending", limit: int = 30):
             k = f"{t.get('home_team','')}_{t.get('away_team','')}_{str(t.get('created_at',''))[:10]}"
             if k not in seen:
                 seen.add(k); unique.append(t)
-        unique = _enrich_tips_with_logos(unique)  # ĂJ: logĂłk hozzĂĄadĂĄsa
+        unique = _enrich_tips_with_logos(unique)  # ÚJ: logók hozzáadása
         return {"status": status, "count": len(unique), "tips": unique}
     except Exception as e:
         return {"error": str(e)}
@@ -643,8 +643,8 @@ def tips_today():
                    and t.get("result_status") not in ["Win","Lost"]]
         closed   = [t for t in all_tips
                    if t.get("result_status") in ["Win","Lost"]][:20]
-        pending  = _enrich_tips_with_logos(pending)  # ĂJ: logĂłk hozzĂĄadĂĄsa
-        closed   = _enrich_tips_with_logos(closed)   # ĂJ: logĂłk hozzĂĄadĂĄsa
+        pending  = _enrich_tips_with_logos(pending)  # ÚJ: logók hozzáadása
+        closed   = _enrich_tips_with_logos(closed)   # ÚJ: logók hozzáadása
         return {
             "date":          today,
             "pending":       pending,
@@ -658,9 +658,9 @@ def tips_today():
 @app.get("/api/tips/history")
 def tip_history(days: int = 30):
     try:
-        # MĂDOSĂTVA: dĂĄtum szerinti szĹąrĂŠs + lapozĂĄs, hogy egy nap ALATTI
-        # Ăśsszes tipp bekerĂźljĂśn (korĂĄbban limit(days*15) sok tippet
-        # levĂĄghatott egy-egy forgalmasabb napon).
+        # MÓDOSÍTVA: dátum szerinti szűrés + lapozás, hogy egy nap ALATTI
+        # összes tipp bekerüljön (korábban limit(days*15) sok tippet
+        # levághatott egy-egy forgalmasabb napon).
         cutoff = (date.today() - timedelta(days=days)).isoformat()
         sb = get_sb()
         all_rows = []
@@ -697,10 +697,10 @@ def tip_history(days: int = 30):
 @simple_cache(30)
 def match_detail(fixture_id: int):
     try:
-        # MĂDOSĂTVA: mindig lekĂŠrjĂźk az ĂŠlĹ fixture-adatot (csapatnevek,
-        # logĂłk, helyszĂ­n, fordulĂł) - korĂĄbban ez csak akkor tĂśrtĂŠnt meg,
-        # ha NEM volt Supabase-elemzĂŠs, ezĂŠrt a mentett tippeknĂŠl hiĂĄnyoztak
-        # a home_logo/away_logo mezĹk a vĂĄlaszbĂłl.
+        # MÓDOSÍTVA: mindig lekérjük az élő fixture-adatot (csapatnevek,
+        # logók, helyszín, forduló) - korábban ez csak akkor történt meg,
+        # ha NEM volt Supabase-elemzés, ezért a mentett tippeknél hiányoztak
+        # a home_logo/away_logo mezők a válaszból.
         fix_data = football_api("fixtures", {"id": fixture_id})
         fix   = (fix_data.get("response") or [{}])[0] if fix_data.get("response") else {}
         teams = fix.get("teams", {}) if fix else {}
@@ -715,7 +715,7 @@ def match_detail(fixture_id: int):
             "created_at", desc=True).limit(1).execute()
         if result.data:
             analysis = result.data[0]
-            # --- MĂDOSĂTVA: modellnevek anonimizĂĄlva, mielĹtt kimegy ---
+            # --- MÓDOSÍTVA: modellnevek anonimizálva, mielőtt kimegy ---
             analysis = sanitize_analysis_for_public(analysis)
             return {
                 "fixture_id": fixture_id,
@@ -728,7 +728,7 @@ def match_detail(fixture_id: int):
                 "source":     "supabase",
             }
 
-        # Ha nincs Supabase-elemzĂŠs, csak ĂŠlĹ adat (odds is bekerĂźl)
+        # Ha nincs Supabase-elemzés, csak élő adat (odds is bekerül)
         if not fix:
             return {"error": "Not found"}
         odds_data = football_api("odds", {"fixture": fixture_id})
@@ -756,13 +756,13 @@ def match_detail(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: JĂTĂKOS SZINTĹ° MECCS-STATISZTIKA ("Meccs embere") ââââââââââââââââââââ
+# ─── ÚJ: JÁTÉKOS SZINTŰ MECCS-STATISZTIKA ("Meccs embere") ────────────────────
 @app.get("/api/match/{fixture_id}/player-stats")
 @simple_cache(120)
 def match_player_stats(fixture_id: int):
     """
-    JĂĄtĂŠkosonkĂŠnti meccs-statisztika (ĂŠrtĂŠkelĂŠs, lĂśvĂŠsek, kulcspassz,
-    pĂĄrharcok, driblizĂŠs). Csak lezĂĄrt vagy ĂŠppen zajlĂł meccsnĂŠl elĂŠrhetĹ.
+    Játékosonkénti meccs-statisztika (értékelés, lövések, kulcspassz,
+    párharcok, driblizés). Csak lezárt vagy éppen zajló meccsnél elérhető.
     """
     try:
         data = football_api("fixtures/players", {"fixture": fixture_id})
@@ -820,13 +820,13 @@ def match_player_stats(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: LIGA GĂLLĂVĹ / GĂLPASSZ LISTA ââââââââââââââââââââââââââââââââââââââââ
+# ─── ÚJ: LIGA GÓLLÖVŐ / GÓLPASSZ LISTA ────────────────────────────────────────
 @app.get("/api/match/{fixture_id}/league-stats")
 @simple_cache(21600)
 def match_league_stats(fixture_id: int):
     """
-    A meccs ligĂĄjĂĄnak gĂłllĂśvĹ- ĂŠs gĂłlpassz-listĂĄja (top 5), plusz a
-    fordulĂł szĂĄma - jĂł kiegĂŠszĂ­tĂŠs a Standings fĂźl mellĂŠ.
+    A meccs ligájának góllövő- és gólpassz-listája (top 5), plusz a
+    forduló száma - jó kiegészítés a Standings fül mellé.
     """
     try:
         fix_data = football_api("fixtures", {"id": fixture_id})
@@ -865,14 +865,14 @@ def match_league_stats(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: PIACI KONSZENZUS ĂSSZEVETĂS (API-Football sajĂĄt predikciĂłja) âââââââââ
+# ─── ÚJ: PIACI KONSZENZUS ÖSSZEVETÉS (API-Football saját predikciója) ─────────
 @app.get("/api/match/{fixture_id}/market-consensus")
 @simple_cache(21600)
 def match_market_consensus(fixture_id: int):
     """
-    Az API-Football sajĂĄt, piaci alapĂş predikciĂłja (%-os esĂŠly ĂŠs
-    tanĂĄcs) - ez NEM a mi AI-nk, hanem egy kĂźlsĹ referenciapont, amivel
-    ĂśsszevethetĹ a sajĂĄt elemzĂŠsĂźnk hitelessĂŠg-erĹsĂ­tĂŠs cĂŠljĂĄbĂłl.
+    Az API-Football saját, piaci alapú predikciója (%-os esély és
+    tanács) - ez NEM a mi AI-nk, hanem egy külső referenciapont, amivel
+    összevethető a saját elemzésünk hitelesség-erősítés céljából.
     """
     try:
         data = football_api("predictions", {"fixture": fixture_id})
@@ -913,7 +913,7 @@ def match_odds(fixture_id: int):
                 if vals.get("Away",0) > best_a: best_a=vals["Away"]; bk_a=bk["name"]
         bookmakers.append(bk_data)
 
-    # ĂJ: odds-mozgĂĄs rĂśgzĂ­tĂŠse ĂŠs lekĂŠrdezĂŠse (nyitĂł vs jelenlegi)
+    # ÚJ: odds-mozgás rögzítése és lekérdezése (nyitó vs jelenlegi)
     movement = record_and_get_odds_movement(fixture_id, {"home": best_h, "draw": best_d, "away": best_a})
 
     return {
@@ -931,14 +931,14 @@ def match_odds(fixture_id: int):
         "movement": movement,
     }
 
-# âââ ĂJ: CSAPAT SZEZON-STATISZTIKA VĂGPONT ââââââââââââââââââââââââââââââââââââ
+# ─── ÚJ: CSAPAT SZEZON-STATISZTIKA VÉGPONT ────────────────────────────────────
 @app.get("/api/match/{fixture_id}/team-stats")
 @simple_cache(21600)
 def match_team_stats(fixture_id: int):
     """
-    MindkĂŠt csapat teljes szezonos statisztikĂĄja: gĂłlĂĄtlag hazai/vendĂŠg
-    bontĂĄsban, clean sheet szĂĄm, gĂłlnĂŠlkĂźli meccsek, legjobb sorozat.
-    Sokkal mĂŠlyebb elemzĂŠsi alap, mint a puszta liga-tabella.
+    Mindkét csapat teljes szezonos statisztikája: gólátlag hazai/vendég
+    bontásban, clean sheet szám, gólnélküli meccsek, legjobb sorozat.
+    Sokkal mélyebb elemzési alap, mint a puszta liga-tabella.
     """
     try:
         fix_data = football_api("fixtures", {"id": fixture_id})
@@ -958,13 +958,13 @@ def match_team_stats(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: RĂSZLETES SĂRĂLĂSEK/ELTILTĂSOK VĂGPONT âââââââââââââââââââââââââââââââ
+# ─── ÚJ: RÉSZLETES SÉRÜLÉSEK/ELTILTÁSOK VÉGPONT ───────────────────────────────
 @app.get("/api/match/{fixture_id}/injuries")
 @simple_cache(21600)
 def match_injuries(fixture_id: int):
     """
-    NĂŠv szerinti sĂŠrĂźlt/eltiltott jĂĄtĂŠkos lista mindkĂŠt csapatnĂĄl,
-    az ok megjelĂślĂŠsĂŠvel (sĂŠrĂźlĂŠs / eltiltĂĄs / kĂŠtsĂŠges).
+    Név szerinti sérült/eltiltott játékos lista mindkét csapatnál,
+    az ok megjelölésével (sérülés / eltiltás / kétséges).
     """
     try:
         data = football_api("injuries", {"fixture": fixture_id})
@@ -975,8 +975,8 @@ def match_injuries(fixture_id: int):
             player_info = item.get("player", {}) or {}
             name = player_info.get("name", "")
             team = (item.get("team", {}) or {}).get("name", "")
-            # Dedupe: az API-Sports.io nĂŠha kĂŠtszer adja vissza ugyanazt a
-            # sĂŠrĂźlĂŠst - nĂŠv + csapat + ok alapjĂĄn szĹąrjĂźk ki a duplikĂĄtumot.
+            # Dedupe: az API-Sports.io néha kétszer adja vissza ugyanazt a
+            # sérülést - név + csapat + ok alapján szűrjük ki a duplikátumot.
             reason = player_info.get("reason", "")
             dedupe_key = (name, team, reason)
             if dedupe_key in seen:
@@ -992,15 +992,15 @@ def match_injuries(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: KĂNNYĹ° SĂRĂLĂS-ĂSSZEGZĹ (tippkĂĄrtyĂĄhoz, gyors ikon-jelzĂŠshez) ââââââââ
+# ─── ÚJ: KÖNNYŰ SÉRÜLÉS-ÖSSZEGZŐ (tippkártyához, gyors ikon-jelzéshez) ────────
 @app.get("/api/match/{fixture_id}/injury-summary")
 @simple_cache(21600)
 def match_injury_summary(fixture_id: int):
     """
-    TĂśmĂśr ĂśsszegzĂŠs a tippkĂĄrtyĂĄkhoz - csak annyi, amennyi egy
-    figyelmeztetĹ ikonhoz/tooltiphez kell (nem a teljes lista).
-    Ugyanazt a nyers API hĂ­vĂĄst hasznĂĄlja, mint a /injuries vĂŠgpont,
-    de csak a lĂŠnyeget adja vissza, hogy a lista-nĂŠzeteknĂŠl gyors legyen.
+    Tömör összegzés a tippkártyákhoz - csak annyi, amennyi egy
+    figyelmeztető ikonhoz/tooltiphez kell (nem a teljes lista).
+    Ugyanazt a nyers API hívást használja, mint a /injuries végpont,
+    de csak a lényeget adja vissza, hogy a lista-nézeteknél gyors legyen.
     """
     try:
         data = football_api("injuries", {"fixture": fixture_id})
@@ -1025,21 +1025,21 @@ def match_injury_summary(fixture_id: int):
             "fixture_id":  fixture_id,
             "count":       total,
             "has_injuries": total > 0,
-            "preview":     top_names,  # max 3 nĂŠv gyors tooltip-hez
+            "preview":     top_names,  # max 3 név gyors tooltip-hez
         }
     except Exception as e:
         return {"error": str(e)}
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
-# âââ ĂJ: "HASONLĂ TIPPEK TELJESĂTMĂNYE" KOHORSZ-STATISZTIKA âââââââââââââââââââ
+# ─── ÚJ: "HASONLÓ TIPPEK TELJESÍTMÉNYE" KOHORSZ-STATISZTIKA ───────────────────
 @app.get("/api/tips/cohort-stats")
 @simple_cache(600)
 def tips_cohort_stats(prediction: str, odds_min: float = 0, odds_max: float = 999):
     """
-    Visszaadja, hogy a mĂşltban hasonlĂł jellemzĹjĹą (azonos predikciĂł-tĂ­pus,
-    hasonlĂł odds-sĂĄv) lezĂĄrt tippek hogyan teljesĂ­tettek. Ezt a frontend
-    a tippkĂĄrtyĂĄn "HasonlĂł tippek eddigi teljesĂ­tmĂŠnye" blokkhoz hĂ­vja.
-    PĂŠlda: GET /api/tips/cohort-stats?prediction=draw&odds_min=3&odds_max=4
+    Visszaadja, hogy a múltban hasonló jellemzőjű (azonos predikció-típus,
+    hasonló odds-sáv) lezárt tippek hogyan teljesítettek. Ezt a frontend
+    a tippkártyán "Hasonló tippek eddigi teljesítménye" blokkhoz hívja.
+    Példa: GET /api/tips/cohort-stats?prediction=draw&odds_min=3&odds_max=4
     """
     try:
         all_tips = fetch_all_tips(status_filter=["Win", "Lost"])
@@ -1051,7 +1051,7 @@ def tips_cohort_stats(prediction: str, odds_min: float = 0, odds_max: float = 99
         if not cohort:
             return {
                 "prediction": prediction, "odds_min": odds_min, "odds_max": odds_max,
-                "count": 0, "win_rate": None, "message": "Nincs elĂŠg korĂĄbbi adat ehhez a kategĂłriĂĄhoz."
+                "count": 0, "win_rate": None, "message": "Nincs elég korábbi adat ehhez a kategóriához."
             }
         wins = sum(1 for t in cohort if t.get("result_status") == "Win")
         profit = sum(float(t.get("profit") or 0) for t in cohort)
@@ -1067,7 +1067,7 @@ def tips_cohort_stats(prediction: str, odds_min: float = 0, odds_max: float = 99
         }
     except Exception as e:
         return {"error": str(e)}
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/match/{fixture_id}/h2h")
 @simple_cache(86400)
@@ -1119,15 +1119,15 @@ def match_h2h(fixture_id: int):
         "matches": matches
     }
 
-# âââ ĂJ: STATISZTIKĂK VĂGPONT (korĂĄbban hiĂĄnyzott!) âââââââââââââââââââââââââââ
+# ─── ÚJ: STATISZTIKÁK VÉGPONT (korábban hiányzott!) ───────────────────────────
 @app.get("/api/match/{fixture_id}/stats")
 @simple_cache(20)
 def match_stats(fixture_id: int):
     """
-    xG, forma, csapat-erĹ ĂŠs egyĂŠb bĹvĂ­tett statisztikĂĄk egy meccshez.
-    Ha a meccs ĂŠlĹ vagy vĂŠget ĂŠrt, visszaadja a rĂŠszletes ĂŠlĹ statisztikĂĄt
-    (lĂśvĂŠsek, birtoklĂĄs, szĂśglet, lapok) ĂŠs az esemĂŠny-naplĂłt is
-    (gĂłlok, lapok, cserĂŠk percenkĂŠnti bontĂĄsban).
+    xG, forma, csapat-erő és egyéb bővített statisztikák egy meccshez.
+    Ha a meccs élő vagy véget ért, visszaadja a részletes élő statisztikát
+    (lövések, birtoklás, szöglet, lapok) és az esemény-naplót is
+    (gólok, lapok, cserék percenkénti bontásban).
     """
     try:
         fix_data = football_api("fixtures", {"id": fixture_id})
@@ -1138,14 +1138,14 @@ def match_stats(fixture_id: int):
         goals  = fix.get("goals", {})
         minute = fix.get("fixture", {}).get("status", {}).get("elapsed")
 
-        # ĂlĹ vagy mĂĄr vĂŠget ĂŠrt meccsnĂŠl lekĂŠrjĂźk a rĂŠszletes statot ĂŠs esemĂŠnyeket
+        # Élő vagy már véget ért meccsnél lekérjük a részletes statot és eseményeket
         live_stats   = None
         match_events = None
         if status in {"1H", "2H", "HT", "ET", "P", "FT", "AET", "PEN"}:
             live_stats   = get_live_stats_parsed(fixture_id)
             match_events = get_match_events(fixture_id)
 
-        # KiegĂŠszĂ­tĹ adatok az elemzĂŠsbĹl (Supabase), ha van
+        # Kiegészítő adatok az elemzésből (Supabase), ha van
         analysis_extra = {}
         _debug_error = None
         try:
@@ -1165,7 +1165,7 @@ def match_stats(fixture_id: int):
                     "a_injuries": a.get("a_injuries"),
                 }
             else:
-                _debug_error = "res.data volt Ăźres (nem talĂĄlt sort ezzel a fixture_id-vel)"
+                _debug_error = "res.data volt üres (nem talált sort ezzel a fixture_id-vel)"
         except Exception as _dbg_e:
             _debug_error = f"{type(_dbg_e).__name__}: {_dbg_e}"
 
@@ -1178,12 +1178,12 @@ def match_stats(fixture_id: int):
             "events":         match_events,
             "pre_match":      analysis_extra,
             "debug_error":    _debug_error,
-            "note": None if (live_stats or analysis_extra) else "ĂlĹ statisztikĂĄk a meccs alatt elĂŠrhetĹk",
+            "note": None if (live_stats or analysis_extra) else "Élő statisztikák a meccs alatt elérhetők",
         }
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: KEZDĹCSAPAT (LINEUP) VĂGPONT (korĂĄbban hiĂĄnyzott!) âââââââââââââââââââ
+# ─── ÚJ: KEZDŐCSAPAT (LINEUP) VÉGPONT (korábban hiányzott!) ───────────────────
 @app.get("/api/match/{fixture_id}/lineup")
 @simple_cache(300)
 def match_lineup(fixture_id: int):
@@ -1194,7 +1194,7 @@ def match_lineup(fixture_id: int):
             return {
                 "fixture_id": fixture_id,
                 "available": False,
-                "note": "KezdĹcsapat kb. 1 ĂłrĂĄval a meccs elĹtt jelenik meg",
+                "note": "Kezdőcsapat kb. 1 órával a meccs előtt jelenik meg",
             }
         teams = []
         for team_lineup in response:
@@ -1223,7 +1223,7 @@ def match_lineup(fixture_id: int):
     except Exception as e:
         return {"error": str(e)}
 
-# âââ ĂJ: LIGA TABELLA VĂGPONT (korĂĄbban hiĂĄnyzott!) âââââââââââââââââââââââââââ
+# ─── ÚJ: LIGA TABELLA VÉGPONT (korábban hiányzott!) ───────────────────────────
 @app.get("/api/match/{fixture_id}/standings")
 @simple_cache(3600)
 def match_standings(fixture_id: int):
@@ -1290,24 +1290,24 @@ def live_fixtures():
 
 @app.get("/api/live/status")
 def live_status():
-    """Live monitor aktuĂĄlis ĂĄllapota."""
+    """Live monitor aktuális állapota."""
     return _monitor_status
 
-# âââ ĂJ: TELEGRAM ELITE HOZZĂFĂRĂS-KEZELĂS ââââââââââââââââââââââââââââââââââââ
-# Egyedi, egyszer hasznĂĄlatos, lejĂĄrĂł meghĂ­vĂł linkek + automatikus eltĂĄvolĂ­tĂĄs
-# lemondĂĄskor. Ez vĂĄltja fel a statikus t.me/dark_ai_tips linket, ami korĂĄbban
-# azt jelentette, hogy egyszeri belĂŠpĂŠs utĂĄn valaki ĂśrĂśkre bent maradt.
+# ─── ÚJ: TELEGRAM ELITE HOZZÁFÉRÉS-KEZELÉS ────────────────────────────────────
+# Egyedi, egyszer használatos, lejáró meghívó linkek + automatikus eltávolítás
+# lemondáskor. Ez váltja fel a statikus t.me/dark_ai_tips linket, ami korábban
+# azt jelentette, hogy egyszeri belépés után valaki örökre bent maradt.
 
 @app.post("/api/telegram/create-invite")
 def telegram_create_invite(app_user_id: str):
     """
-    MeghĂ­vja az Elite elĹfizetĹt: 1x hasznĂĄlatos, 48 ĂłrĂĄn belĂźl lejĂĄrĂł
-    linket generĂĄl. Ezt hĂ­vja Lovable, amikor valaki Elite-re fizet elĹ.
+    Meghívja az Elite előfizetőt: 1x használatos, 48 órán belül lejáró
+    linket generál. Ezt hívja Lovable, amikor valaki Elite-re fizet elő.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
-        return {"error": "Telegram nincs konfigurĂĄlva"}
+        return {"error": "Telegram nincs konfigurálva"}
     try:
-        expire_ts = int(time.time()) + 48 * 3600  # 48 Ăłra
+        expire_ts = int(time.time()) + 48 * 3600  # 48 óra
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/createChatInviteLink",
             json={
@@ -1321,7 +1321,7 @@ def telegram_create_invite(app_user_id: str):
         result = r.json()
         invite_link = result.get("result", {}).get("invite_link")
         if not invite_link:
-            return {"error": "Nem sikerĂźlt linket generĂĄlni", "detail": result}
+            return {"error": "Nem sikerült linket generálni", "detail": result}
 
         sb = get_sb()
         sb.table("telegram_invites").insert({
@@ -1337,23 +1337,23 @@ def telegram_create_invite(app_user_id: str):
 @app.post("/api/telegram/revoke-access")
 def telegram_revoke_access(app_user_id: str):
     """
-    KirĂşgja az adott elĹfizetĹt a Telegram csoportbĂłl, amikor lemondja
-    az Elite elĹfizetĂŠst vagy lejĂĄr a fizetĂŠse. Ezt hĂ­vja Lovable a
-    Stripe "subscription cancelled/expired" esemĂŠnyĂŠnĂŠl.
+    Kirúgja az adott előfizetőt a Telegram csoportból, amikor lemondja
+    az Elite előfizetést vagy lejár a fizetése. Ezt hívja Lovable a
+    Stripe "subscription cancelled/expired" eseményénél.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
-        return {"error": "Telegram nincs konfigurĂĄlva"}
+        return {"error": "Telegram nincs konfigurálva"}
     try:
         sb = get_sb()
         res = sb.table("telegram_members").select("*").eq(
             "app_user_id", app_user_id).order("joined_at", desc=True).limit(1).execute()
         if not res.data:
-            return {"error": "Nincs ismert Telegram-tagsĂĄg ehhez a felhasznĂĄlĂłhoz"}
+            return {"error": "Nincs ismert Telegram-tagság ehhez a felhasználóhoz"}
 
         telegram_user_id = res.data[0].get("telegram_user_id")
 
-        # KirĂşgĂĄs, majd azonnali "unban", hogy kĂŠsĹbb egy Ăşj meghĂ­vĂłval
-        # Ăşjra tudjon csatlakozni, ha Ăşjra elĹfizet.
+        # Kirúgás, majd azonnali "unban", hogy később egy új meghívóval
+        # újra tudjon csatlakozni, ha újra előfizet.
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/banChatMember",
             json={"chat_id": TELEGRAM_CHANNEL, "user_id": telegram_user_id},
@@ -1373,9 +1373,9 @@ def telegram_revoke_access(app_user_id: str):
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     """
-    Ide kĂźldi a Telegram a csoport-esemĂŠnyeket (ki lĂŠpett be melyik
-    meghĂ­vĂł linkkel). EbbĹl tudjuk meg, melyik Telegram-fiĂłk tartozik
-    melyik elĹfizetĹhĂśz - enĂŠlkĂźl nem tudnĂĄnk kit kirĂşgni lemondĂĄskor.
+    Ide küldi a Telegram a csoport-eseményeket (ki lépett be melyik
+    meghívó linkkel). Ebből tudjuk meg, melyik Telegram-fiók tartozik
+    melyik előfizetőhöz - enélkül nem tudnánk kit kirúgni lemondáskor.
     """
     try:
         update = await request.json()
@@ -1405,12 +1405,12 @@ async def telegram_webhook(request: Request):
     except Exception as e:
         log.error(f"Telegram webhook hiba: {e}")
         return {"ok": True}
-# ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ────────────────────────────────────────────────────────────────────────────
 
 @app.get("/api/bankroll")
 def bankroll():
     try:
-        # MĂDOSĂTVA: lapozott lekĂŠrdezĂŠs, ugyanaz az ok, mint a /api/stats/public-nĂĄl.
+        # MÓDOSÍTVA: lapozott lekérdezés, ugyanaz az ok, mint a /api/stats/public-nál.
         tips   = fetch_all_tips(status_filter=["Win","Lost"])
         wins   = sum(1 for t in tips if t.get("result_status")=="Win")
         profit = sum(float(t.get("profit") or 0) for t in tips)
@@ -1448,9 +1448,9 @@ def arbitrage(date_str: str = ""):
             away_nm = fix.get("teams",{}).get("away",{}).get("name","")
             league  = fix.get("league",{}).get("name","")
             odds_d  = football_api("odds", {"fixture": fid})
-            # MĂDOSĂTVA: biztonsĂĄgos hozzĂĄfĂŠrĂŠs, ha a "response" Ăźres lista
-            # (nincs elĂŠrhetĹ odds ehhez a meccshez) - korĂĄbban ez IndexError-t
-            # dobott, ami az egĂŠsz vĂŠgpontot lefagyasztotta.
+            # MÓDOSÍTVA: biztonságos hozzáférés, ha a "response" üres lista
+            # (nincs elérhető odds ehhez a meccshez) - korábban ez IndexError-t
+            # dobott, ami az egész végpontot lefagyasztotta.
             odds_response = odds_d.get("response") or [{}]
             bh=bd=ba=0.0; nbh=nbd=nba=""
             for bk in (odds_response[0] or {}).get("bookmakers",[]):
@@ -1478,7 +1478,7 @@ def arbitrage(date_str: str = ""):
     except Exception as e:
         return {"error": str(e), "date": target if 'target' in dir() else date_str, "count": 0, "opportunities": []}
 
-# âââ LIVE MONITOR (hĂĄttĂŠrszĂĄl) ââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── LIVE MONITOR (háttérszál) ────────────────────────────────────────────────
 _monitor_status = {
     "running":      False,
     "last_cycle":   None,
@@ -1488,20 +1488,20 @@ _monitor_status = {
 }
 _sent_alerts = set()
 _last_scores = {}
-_last_decision_state = {}  # fixture_id -> utoljĂĄra kikĂźldĂśtt dĂśntĂŠsi szint
-_last_daily_maintenance_date = None  # dĂĄtum, amikor utoljĂĄra lefutott a napi Telegram-karbantartĂĄs (tĂśrlĂŠs)
-_last_daily_recap_date = None        # dĂĄtum, amikor utoljĂĄra lefutott a "tegnapi eredmĂŠnyek" ĂśsszesĂ­tĹ
-_last_new_tip_check = 0              # timestamp, mikor nĂŠztĂźk utoljĂĄra az Ăşj tippeket
+_last_decision_state = {}  # fixture_id -> utoljára kiküldött döntési szint
+_last_daily_maintenance_date = None  # dátum, amikor utoljára lefutott a napi Telegram-karbantartás (törlés)
+_last_daily_recap_date = None        # dátum, amikor utoljára lefutott a "tegnapi eredmények" összesítő
+_last_new_tip_check = 0              # timestamp, mikor néztük utoljára az új tippeket
 
-NEW_TIP_CHECK_INTERVAL_SEC = 120  # ennyi mĂĄsodpercenkĂŠnt nĂŠzzĂźk meg, van-e Ăşj, be nem jelentett tipp
+NEW_TIP_CHECK_INTERVAL_SEC = 120  # ennyi másodpercenként nézzük meg, van-e új, be nem jelentett tipp
 
-TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram Ăźzenetek
+TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram üzenetek
 
 
 def _is_recommended_tip(t: dict) -> bool:
-    """Ugyanaz a logika, mint a Lovable frontend szĹąrĹje:
-    egy tipp akkor szĂĄmĂ­t 'tĂŠt ajĂĄnlĂĄsosnak', ha van Kelly-tĂŠt,
-    value bet jelzĂŠs, vagy smart_pro elfogadĂĄs."""
+    """Ugyanaz a logika, mint a Lovable frontend szűrője:
+    egy tipp akkor számít 'tét ajánlásosnak', ha van Kelly-tét,
+    value bet jelzés, vagy smart_pro elfogadás."""
     try:
         return bool(
             (t.get("rec_stake") and float(t.get("rec_stake") or 0) > 0) or
@@ -1514,7 +1514,7 @@ def _is_recommended_tip(t: dict) -> bool:
 
 
 def _summarize_tip_group(tips_subset):
-    """KĂśzĂśs ĂśsszesĂ­tĹ logika: darabszĂĄm, gyĹzelem/vesztĂŠs, win rate, profit."""
+    """Közös összesítő logika: darabszám, győzelem/vesztés, win rate, profit."""
     closed = [t for t in tips_subset if t.get("result_status") in ("Win", "Lost")]
     wins = sum(1 for t in closed if t.get("result_status") == "Win")
     profit = sum(float(t.get("profit") or 0) for t in closed)
@@ -1530,17 +1530,17 @@ def _summarize_tip_group(tips_subset):
 
 def build_daily_summary_message(target_date: str) -> str:
     """
-    ĂsszeĂĄllĂ­t egy napi ĂśsszesĂ­tĹ Telegram Ăźzenetet a megadott napra
-    (YYYY-MM-DD), kĂźlĂśn szekciĂłval a tĂŠt ajĂĄnlĂĄsos ĂŠs a tĂŠt ajĂĄnlĂĄs
-    nĂŠlkĂźli tippekre. Ezt a tĂśrlĂŠs ELĹTT kĂźldjĂźk ki, arra a napra,
-    aminek az Ăźzenetei ĂŠpp most vĂĄlnak rĂŠgivĂŠ.
+    Összeállít egy napi összesítő Telegram üzenetet a megadott napra
+    (YYYY-MM-DD), külön szekcióval a tét ajánlásos és a tét ajánlás
+    nélküli tippekre. Ezt a törlés ELŐTT küldjük ki, arra a napra,
+    aminek az üzenetei épp most válnak régivé.
     """
     try:
-        # MĂDOSĂTVA: lapozott lekĂŠrdezĂŠs (lĂĄsd fetch_all_tips), hogy ez se
-        # essen bele az 1000-es alapĂŠrtelmezett Supabase limitbe.
+        # MÓDOSÍTVA: lapozott lekérdezés (lásd fetch_all_tips), hogy ez se
+        # essen bele az 1000-es alapértelmezett Supabase limitbe.
         all_tips = fetch_all_tips()
     except Exception as e:
-        log.error(f"Napi ĂśsszesĂ­tĹ - tips lekĂŠrĂŠs hiba: {e}")
+        log.error(f"Napi összesítő - tips lekérés hiba: {e}")
         return None
 
     day_tips = [t for t in all_tips if str(t.get("created_at", ""))[:10] == target_date]
@@ -1553,13 +1553,13 @@ def build_daily_summary_message(target_date: str) -> str:
     r = _summarize_tip_group(recommended)
     n = _summarize_tip_group(normal)
 
-    msg  = f"đ <b>Daily Summary â {target_date}</b>\n\n"
-    msg += f"đ <b>Stake-recommended tips</b> ({r['total']})\n"
-    msg += f"  â {r['wins']} won / â {r['losses']} lost (win rate: {r['win_rate']}%)\n"
-    msg += f"  đ° Total profit: {r['profit']:+,.0f} coin\n\n"
-    msg += f"đ <b>Non-recommended tips</b> ({n['total']})\n"
-    msg += f"  â {n['wins']} won / â {n['losses']} lost (win rate: {n['win_rate']}%)\n"
-    msg += f"  đ° Total profit: {n['profit']:+,.0f} coin\n\n"
+    msg  = f"📊 <b>Daily Summary – {target_date}</b>\n\n"
+    msg += f"💎 <b>Stake-recommended tips</b> ({r['total']})\n"
+    msg += f"  ✅ {r['wins']} won / ❌ {r['losses']} lost (win rate: {r['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {r['profit']:+,.0f} coin\n\n"
+    msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
+    msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {n['profit']:+,.0f} coin\n\n"
     msg += f"<i>This day's detailed live alerts will now be removed "
     msg += f"from the channel ({TELEGRAM_RETENTION_DAYS}-day retention policy).</i>"
     return msg
@@ -1567,20 +1567,20 @@ def build_daily_summary_message(target_date: str) -> str:
 
 def send_yesterday_recap():
     """
-    ĂJ: minden nap egyszer elkĂźldi a TEGNAPI nap eredmĂŠnyeit
-    (tĂŠt ajĂĄnlĂĄsos / nem-ajĂĄnlĂĄsos bontĂĄsban) - ez FĂGGETLEN a
-    2 napos tĂśrlĂŠsi logikĂĄtĂłl, csak informatĂ­v, semmit nem tĂśrĂśl.
+    ÚJ: minden nap egyszer elküldi a TEGNAPI nap eredményeit
+    (tét ajánlásos / nem-ajánlásos bontásban) - ez FÜGGETLEN a
+    2 napos törlési logikától, csak informatív, semmit nem töröl.
     """
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     try:
         all_tips = fetch_all_tips()
     except Exception as e:
-        log.error(f"Tegnapi ĂśsszesĂ­tĹ - tips lekĂŠrĂŠs hiba: {e}")
+        log.error(f"Tegnapi összesítő - tips lekérés hiba: {e}")
         return
 
     day_tips = [t for t in all_tips if str(t.get("created_at", ""))[:10] == yesterday]
     if not day_tips:
-        return  # nem kĂźldĂźnk Ăźres Ăźzenetet, ha tegnap nem volt tipp
+        return  # nem küldünk üres üzenetet, ha tegnap nem volt tipp
 
     recommended = [t for t in day_tips if _is_recommended_tip(t)]
     normal      = [t for t in day_tips if not _is_recommended_tip(t)]
@@ -1588,24 +1588,24 @@ def send_yesterday_recap():
     r = _summarize_tip_group(recommended)
     n = _summarize_tip_group(normal)
 
-    msg  = f"đ <b>Yesterday's Results â {yesterday}</b>\n\n"
-    msg += f"đ <b>Stake-recommended tips</b> ({r['total']})\n"
-    msg += f"  â {r['wins']} won / â {r['losses']} lost (win rate: {r['win_rate']}%)\n"
-    msg += f"  đ° Total profit: {r['profit']:+,.0f} coin\n\n"
-    msg += f"đ <b>Non-recommended tips</b> ({n['total']})\n"
-    msg += f"  â {n['wins']} won / â {n['losses']} lost (win rate: {n['win_rate']}%)\n"
-    msg += f"  đ° Total profit: {n['profit']:+,.0f} coin"
+    msg  = f"🌅 <b>Yesterday's Results – {yesterday}</b>\n\n"
+    msg += f"💎 <b>Stake-recommended tips</b> ({r['total']})\n"
+    msg += f"  ✅ {r['wins']} won / ❌ {r['losses']} lost (win rate: {r['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {r['profit']:+,.0f} coin\n\n"
+    msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
+    msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
+    msg += f"  💰 Total profit: {n['profit']:+,.0f} coin"
     send_telegram(msg, category="yesterday_recap")
 
 
 def check_and_notify_new_tips():
     """
-    MegnĂŠzi, van-e olyan tipp a Supabase-ben, amirĹl mĂŠg nem kĂźldtĂźnk
-    Telegram-ĂŠrtesĂ­tĂŠst (telegram_notified = false). Ha 1-3 Ăşj tipp
-    van, mindegyikrĹl kĂźlĂśn, rĂŠszletes Ăźzenetet kĂźld. Ha ennĂŠl TĂBB
-    (pl. egy nagyobb elemzĂŠsi kĂśr egyszerre 15+ meccset mentett),
-    EGYETLEN ĂśsszefoglalĂł Ăźzenetbe gyĹąjti Ĺket - Ă­gy egyszerre sok Ăşj
-    tipp sem ĂĄrasztja el a csatornĂĄt kĂźlĂśn-kĂźlĂśn Ăźzenetekkel.
+    Megnézi, van-e olyan tipp a Supabase-ben, amiről még nem küldtünk
+    Telegram-értesítést (telegram_notified = false). Ha 1-3 új tipp
+    van, mindegyikről külön, részletes üzenetet küld. Ha ennél TÖBB
+    (pl. egy nagyobb elemzési kör egyszerre 15+ meccset mentett),
+    EGYETLEN összefoglaló üzenetbe gyűjti őket - így egyszerre sok új
+    tipp sem árasztja el a csatornát külön-külön üzenetekkel.
     """
     try:
         sb = get_sb()
@@ -1614,13 +1614,33 @@ def check_and_notify_new_tips():
         ).order("created_at", desc=False).limit(50).execute()
         new_tips = result.data or []
     except Exception as e:
-        log.error(f"Ăj tipp ellenĹrzĂŠs hiba: {e}")
+        log.error(f"Új tipp ellenőrzés hiba: {e}")
         return
 
     if not new_tips:
         return
 
     pred_label_map = {"home": "Home", "draw": "Draw", "away": "Away"}
+
+    # Keep the source of Telegram formatting ASCII-only.  GitHub's web editor
+    # and some Windows copy/paste paths can otherwise turn UTF-8 symbols into
+    # corrupted byte sequences before Railway starts the app.
+    # Python builds the real Unicode characters at runtime from these escapes.
+    tg = {
+        "football": "\u26bd",
+        "diamond": "\U0001f48e",
+        "stadium": "\U0001f3df",
+        "trophy": "\U0001f3c6",
+        "target": "\U0001f3af",
+        "brain": "\U0001f9e0",
+        "chart": "\U0001f4c8",
+        "money": "\U0001f4b0",
+        "eye": "\U0001f441",
+        "divider": "\u2501" * 18,
+        "dash": "\u2013",
+        "bullet": "\u2022",
+        "middle_dot": "\u00b7",
+    }
 
     def _tip_ids(tips_list):
         return [t.get("id") for t in tips_list]
@@ -1631,32 +1651,49 @@ def check_and_notify_new_tips():
             try:
                 sb.table("tips").update({"telegram_notified": True}).in_("id", ids).execute()
             except Exception as e:
-                log.error(f"BejelentettkĂŠnt jelĂślĂŠs hiba: {e}")
+                log.error(f"Bejelentettként jelölés hiba: {e}")
 
-    NOTIFY_INDIVIDUAL_THRESHOLD = 3  # ennĂŠl kevesebb Ăşj tippnĂŠl mĂŠg egyenkĂŠnt kĂźldĂźnk
+    NOTIFY_INDIVIDUAL_THRESHOLD = 3  # ennél kevesebb új tippnél még egyenként küldünk
 
     if len(new_tips) <= NOTIFY_INDIVIDUAL_THRESHOLD:
         for tip in new_tips:
             try:
                 pred_label = pred_label_map.get(tip.get("prediction"), tip.get("prediction", ""))
                 recommended = _is_recommended_tip(tip)
-                msg  = "đ <b>PREMIUM PICK</b>\n" if recommended else "â˝ <b>NEW DARK AI PICK</b>\n"
-                msg += "ââââââââââââââââââ\n"
-                msg += f"đ <b>{_tg(tip.get('home_team'))} â {_tg(tip.get('away_team'))}</b>\n"
-                msg += f"đ {_tg(tip.get('league') or 'Unknown league')}\n\n"
-                msg += f"đŻ <b>{_tg(pred_label)}</b>  â˘  Odds: <b>{float(tip.get('odds') or 0):.2f}</b>\n"
-                msg += f"đ§  AI confidence: <b>{float(tip.get('confidence') or 0):.0f}%</b>"
+                headline_icon = tg["diamond"] if recommended else tg["football"]
+                headline = "PREMIUM PICK" if recommended else "NEW DARK AI PICK"
+                msg  = f"{headline_icon} <b>{headline}</b>\n"
+                msg += f"{tg['divider']}\n"
+                msg += (
+                    f"{tg['stadium']} <b>{_tg(tip.get('home_team'))} "
+                    f"{tg['dash']} {_tg(tip.get('away_team'))}</b>\n"
+                )
+                msg += f"{tg['trophy']} {_tg(tip.get('league') or 'Unknown league')}\n\n"
+                msg += (
+                    f"{tg['target']} <b>{_tg(pred_label)}</b>  {tg['bullet']}  "
+                    f"Odds: <b>{float(tip.get('odds') or 0):.2f}</b>\n"
+                )
+                msg += (
+                    f"{tg['brain']} AI confidence: "
+                    f"<b>{float(tip.get('confidence') or 0):.0f}%</b>"
+                )
                 value_edge = float(tip.get('value_edge') or 0)
                 if value_edge:
-                    msg += f"\nđ Value edge: <b>+{value_edge:.1f}%</b>"
+                    msg += f"\n{tg['chart']} Value edge: <b>+{value_edge:.1f}%</b>"
                 if recommended:
-                    msg += f"\nđ° Recommended stake: <b>{float(tip.get('rec_stake') or 0):,.0f} coin</b>"
-                msg += "\n\n<i>For information only. 18+ Âˇ Gamble responsibly.</i>"
+                    msg += (
+                        f"\n{tg['money']} Recommended stake: "
+                        f"<b>{float(tip.get('rec_stake') or 0):,.0f} coin</b>"
+                    )
+                msg += (
+                    "\n\n<i>For information only. 18+ "
+                    f"{tg['middle_dot']} Gamble responsibly.</i>"
+                )
                 send_telegram(
                     msg,
                     category="new_tip",
                     fixture_id=tip.get("fixture_id"),
-                    buttons=[("đ VIEW FULL ANALYSIS", TIPS_PAGE_URL)],
+                    buttons=[(f"{tg['chart']} VIEW FULL ANALYSIS", TIPS_PAGE_URL)],
                 )
             except Exception as e:
                 log.error(f"New tip alert error (id={tip.get('id')}): {e}")
@@ -1666,11 +1703,11 @@ def check_and_notify_new_tips():
         try:
             recommended = [t for t in new_tips if _is_recommended_tip(t)]
             observation = [t for t in new_tips if not _is_recommended_tip(t)]
-            msg  = "â˝ <b>DARK AI STRATEGY</b>\n"
+            msg  = f"{tg['football']} <b>DARK AI STRATEGY</b>\n"
             msg += f"<b>{len(new_tips)} NEW PICKS</b>\n"
-            msg += "ââââââââââââââââââ\n"
-            msg += f"đ Stake recommended: <b>{len(recommended)}</b>\n"
-            msg += f"đ Watchlist: <b>{len(observation)}</b>\n"
+            msg += f"{tg['divider']}\n"
+            msg += f"{tg['diamond']} Stake recommended: <b>{len(recommended)}</b>\n"
+            msg += f"{tg['eye']} Watchlist: <b>{len(observation)}</b>\n"
 
             def append_group(title, icon, rows, limit):
                 nonlocal msg
@@ -1680,31 +1717,36 @@ def check_and_notify_new_tips():
                 for idx, tip in enumerate(rows[:limit], 1):
                     pred_label = pred_label_map.get(tip.get("prediction"), tip.get("prediction", ""))
                     msg += (
-                        f"{idx}. <b>{_tg(tip.get('home_team'))} â {_tg(tip.get('away_team'))}</b>\n"
-                        f"   đŻ {_tg(pred_label)}  â˘  <b>{float(tip.get('odds') or 0):.2f}</b>\n"
+                        f"{idx}. <b>{_tg(tip.get('home_team'))} {tg['dash']} "
+                        f"{_tg(tip.get('away_team'))}</b>\n"
+                        f"   {tg['target']} {_tg(pred_label)}  {tg['bullet']}  "
+                        f"<b>{float(tip.get('odds') or 0):.2f}</b>\n"
                     )
                 if len(rows) > limit:
                     msg += f"   <i>+{len(rows) - limit} more picks on the website</i>\n"
 
-            append_group("STAKE-RECOMMENDED PICKS", "đ", recommended, 10)
-            append_group("WATCHLIST", "đ", observation, 8)
-            msg += "\nââââââââââââââââââ\n"
-            msg += "<i>18+ Âˇ Gamble responsibly. Picks are for information only.</i>"
+            append_group("STAKE-RECOMMENDED PICKS", tg["diamond"], recommended, 10)
+            append_group("WATCHLIST", tg["eye"], observation, 8)
+            msg += f"\n{tg['divider']}\n"
+            msg += (
+                f"<i>18+ {tg['middle_dot']} Gamble responsibly. "
+                "Picks are for information only.</i>"
+            )
             send_telegram(
                 msg,
                 category="new_tip_digest",
-                buttons=[("đ ALL PICKS & ANALYSIS", TIPS_PAGE_URL)],
+                buttons=[(f"{tg['chart']} ALL PICKS & ANALYSIS", TIPS_PAGE_URL)],
             )
         except Exception as e:
-            log.error(f"ĂsszesĂ­tett Ăşj tipp ĂŠrtesĂ­tĂŠs hiba: {e}")
+            log.error(f"Összesített új tipp értesítés hiba: {e}")
         _mark_notified(new_tips)
 
 
 def delete_old_telegram_messages(older_than_date: str):
     """
-    TĂśrĂśl minden Telegram Ăźzenetet a csatornĂĄbĂłl, ami `older_than_date`
-    (YYYY-MM-DD) napon vagy azelĹtt lett elkĂźldve, majd tĂśrli a
-    hozzĂĄjuk tartozĂł nyilvĂĄntartĂĄsi sorokat is a Supabase-bĹl.
+    Töröl minden Telegram üzenetet a csatornából, ami `older_than_date`
+    (YYYY-MM-DD) napon vagy azelőtt lett elküldve, majd törli a
+    hozzájuk tartozó nyilvántartási sorokat is a Supabase-ből.
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
         return
@@ -1715,7 +1757,7 @@ def delete_old_telegram_messages(older_than_date: str):
         ).execute()
         old_messages = result.data or []
     except Exception as e:
-        log.error(f"telegram_messages lekĂŠrĂŠs hiba: {e}")
+        log.error(f"telegram_messages lekérés hiba: {e}")
         return
 
     deleted_count = 0
@@ -1729,21 +1771,21 @@ def delete_old_telegram_messages(older_than_date: str):
             )
             deleted_count += 1
         except Exception as e:
-            log.error(f"Telegram Ăźzenet tĂśrlĂŠs hiba (message_id={msg_id}): {e}")
+            log.error(f"Telegram üzenet törlés hiba (message_id={msg_id}): {e}")
         try:
             sb.table("telegram_messages").delete().eq("id", row.get("id")).execute()
         except Exception:
             pass
 
-    log.info(f"đ§š Telegram karbantartĂĄs: {deleted_count} rĂŠgi Ăźzenet tĂśrĂślve ({older_than_date} ĂŠs korĂĄbbi).")
+    log.info(f"🧹 Telegram karbantartás: {deleted_count} régi üzenet törölve ({older_than_date} és korábbi).")
 
 
 def run_daily_telegram_maintenance():
     """
-    Naponta egyszer lefutĂł karbantartĂĄs:
-    1. ElkĂźldi az ĂśsszesĂ­tĹt arra a napra, ami most vĂĄlik "rĂŠgivĂŠ"
-       (a megĹrzĂŠsi hatĂĄr napja).
-    2. TĂśrli a csatornĂĄbĂłl az annĂĄl a napnĂĄl rĂŠgebbi egyedi Ăźzeneteket.
+    Naponta egyszer lefutó karbantartás:
+    1. Elküldi az összesítőt arra a napra, ami most válik "régivé"
+       (a megőrzési határ napja).
+    2. Törli a csatornából az annál a napnál régebbi egyedi üzeneteket.
     """
     purge_date = (date.today() - timedelta(days=TELEGRAM_RETENTION_DAYS)).isoformat()
 
@@ -1756,7 +1798,7 @@ def run_daily_telegram_maintenance():
 
 
 def get_todays_tips_from_supabase() -> dict:
-    """Mai pending tippek fixture_id â tip mapping."""
+    """Mai pending tippek fixture_id → tip mapping."""
     try:
         sb     = get_sb()
         today  = date.today().isoformat()
@@ -1774,7 +1816,7 @@ def get_todays_tips_from_supabase() -> dict:
         return {}
 
 def analyze_situation(tip: dict, fixture: dict, events: list) -> dict:
-    """Gyors helyzetelemzĂŠs cash out javaslathoz."""
+    """Gyors helyzetelemzés cash out javaslathoz."""
     goals     = fixture.get("goals",{})
     fix_info  = fixture.get("fixture",{})
     teams     = fixture.get("teams",{})
@@ -1787,8 +1829,8 @@ def analyze_situation(tip: dict, fixture: dict, events: list) -> dict:
 
     winning   = (pred_key=="home" and hg>ag) or (pred_key=="away" and ag>hg) or (pred_key=="draw" and hg==ag)
     red_cards = [e for e in events if "Red Card" in e.get("detail","")]
-    # DĂśntetlen tippnĂŠl nincs egyetlen "sajĂĄt csapat", ezĂŠrt egy piros lap
-    # ĂśnmagĂĄban nem jelent automatikus kiszĂĄllĂĄst.
+    # Döntetlen tippnél nincs egyetlen "saját csapat", ezért egy piros lap
+    # önmagában nem jelent automatikus kiszállást.
     our_team = 0
     if pred_key in {"home", "away"}:
         our_team = teams.get(pred_key, {}).get("id", 0)
@@ -1815,16 +1857,16 @@ def _prediction_hu(prediction) -> str:
         "home": "Home win", "1": "Home win",
         "draw": "Draw", "x": "Draw",
         "away": "Away win", "2": "Away win",
-    }.get(str(prediction or "").lower(), str(prediction or "â"))
+    }.get(str(prediction or "").lower(), str(prediction or "—"))
 
 
 def _urgency_view(situation: dict) -> tuple:
     return {
-        "critical": ("đ¨", "CRITICAL DECISION ALERT"),
-        "high":     ("â ď¸", "DECISION WARNING"),
-        "low":      ("đ", "POSITION STABLE"),
-        "normal":   ("â", "LIVE MATCH UPDATE"),
-    }.get(situation.get("urgency"), ("âšď¸", "LIVE MATCH UPDATE"))
+        "critical": ("🚨", "CRITICAL DECISION ALERT"),
+        "high":     ("⚠️", "DECISION WARNING"),
+        "low":      ("🔒", "POSITION STABLE"),
+        "normal":   ("✅", "LIVE MATCH UPDATE"),
+    }.get(situation.get("urgency"), ("ℹ️", "LIVE MATCH UPDATE"))
 
 
 def _live_message(
@@ -1834,25 +1876,25 @@ def _live_message(
     icon, status_title = _urgency_view(situation)
     odds = float(tip.get("odds") or 0)
     msg  = f"{icon} <b>{status_title}</b>\n"
-    msg += "ââââââââââââââââââ\n"
-    msg += f"đ´ <b>LIVE Âˇ {int(minute or 0)}'</b>\n"
-    msg += f"đ <b>{_tg(home_nm)} {hg}â{ag} {_tg(away_nm)}</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n"
+    msg += f"🔴 <b>LIVE · {int(minute or 0)}'</b>\n"
+    msg += f"🏟 <b>{_tg(home_nm)} {hg}–{ag} {_tg(away_nm)}</b>\n"
     if event_title:
         msg += f"\n{event_title}\n"
     if event_detail:
         msg += f"{_tg(event_detail)}\n"
-    msg += f"\nđŻ Your pick: <b>{_tg(_prediction_hu(tip.get('prediction')))}</b>"
+    msg += f"\n🎯 Your pick: <b>{_tg(_prediction_hu(tip.get('prediction')))}</b>"
     if odds > 1:
         msg += f" @ <b>{odds:.2f}</b>"
     msg += f"\n\n{icon} Recommendation: <b>{_tg(situation.get('action'))}</b>\n"
-    msg += f"đĄ {_tg(situation.get('reason'))}\n"
-    msg += f"\n<i>Updated: {datetime.now().strftime('%H:%M')} Âˇ Automated decision support</i>"
+    msg += f"💡 {_tg(situation.get('reason'))}\n"
+    msg += f"\n<i>Updated: {datetime.now().strftime('%H:%M')} · Automated decision support</i>"
     return msg
 
 def live_monitor_loop():
-    """HĂĄttĂŠrszĂĄlon fut Railway-en 24/7."""
+    """Háttérszálon fut Railway-en 24/7."""
     global _monitor_status
-    log.info("đ´ Live Monitor indul Railway-en...")
+    log.info("🔴 Live Monitor indul Railway-en...")
     _monitor_status["running"] = True
     api_calls = 0
 
@@ -1860,37 +1902,37 @@ def live_monitor_loop():
         try:
             cycle_start = time.time()
 
-            # âââ ĂJ: napi Telegram karbantartĂĄs (ĂśsszesĂ­tĹ + rĂŠgi Ăźzenetek tĂśrlĂŠse) âââ
+            # ─── ÚJ: napi Telegram karbantartás (összesítő + régi üzenetek törlése) ───
             global _last_daily_maintenance_date
             today_iso = date.today().isoformat()
             if _last_daily_maintenance_date != today_iso:
                 try:
                     run_daily_telegram_maintenance()
                 except Exception as _maint_e:
-                    log.error(f"Napi Telegram karbantartĂĄs hiba: {_maint_e}")
+                    log.error(f"Napi Telegram karbantartás hiba: {_maint_e}")
                 _last_daily_maintenance_date = today_iso
-            # ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+            # ────────────────────────────────────────────────────────────────────────
 
-            # âââ ĂJ: "Tegnapi eredmĂŠnyek" napi ĂśsszesĂ­tĹ (nem tĂśrĂśl semmit) âââââââââââ
+            # ─── ÚJ: "Tegnapi eredmények" napi összesítő (nem töröl semmit) ───────────
             global _last_daily_recap_date
             if _last_daily_recap_date != today_iso:
                 try:
                     send_yesterday_recap()
                 except Exception as _recap_e:
-                    log.error(f"Tegnapi ĂśsszesĂ­tĹ hiba: {_recap_e}")
+                    log.error(f"Tegnapi összesítő hiba: {_recap_e}")
                 _last_daily_recap_date = today_iso
-            # ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+            # ────────────────────────────────────────────────────────────────────────
 
-            # âââ ĂJ: "Ăj tipp" azonnali ĂŠrtesĂ­tĂŠs ellenĹrzĂŠse âââââââââââââââââââââââââ
+            # ─── ÚJ: "Új tipp" azonnali értesítés ellenőrzése ─────────────────────────
             global _last_new_tip_check
             now_ts = time.time()
             if now_ts - _last_new_tip_check >= NEW_TIP_CHECK_INTERVAL_SEC:
                 try:
                     check_and_notify_new_tips()
                 except Exception as _tip_e:
-                    log.error(f"Ăj tipp ĂŠrtesĂ­tĂŠs ellenĹrzĂŠs hiba: {_tip_e}")
+                    log.error(f"Új tipp értesítés ellenőrzés hiba: {_tip_e}")
                 _last_new_tip_check = now_ts
-            # ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+            # ────────────────────────────────────────────────────────────────────────
 
             today_tips  = get_todays_tips_from_supabase()
             _monitor_status["active_tips"] = len(today_tips)
@@ -1900,7 +1942,7 @@ def live_monitor_loop():
                 time.sleep(120)  # 2 perc ha nincs tipp
                 continue
 
-            # 1 hĂ­vĂĄs az Ăśsszes ĂŠlĹ meccshez
+            # 1 hívás az összes élő meccshez
             live_data = football_api("fixtures", {"live": "all"})
             api_calls += 1
             _monitor_status["api_calls"] = api_calls
@@ -1925,32 +1967,32 @@ def live_monitor_loop():
                 home_nm = teams.get("home",{}).get("name","")
                 away_nm = teams.get("away",{}).get("name","")
 
-                # FONTOS: minden meccsnĂŠl, minden ciklusban Ăşjra kell szĂĄmolni.
-                # KorĂĄbban ez csak eredmĂŠnyvĂĄltozĂĄskor tĂśrtĂŠnt, ezĂŠrt a cash-out
-                # Ăźzenet ĂĄtvehette az elĹzĹ meccs tippjĂŠt ĂŠs oddsĂĄt.
+                # FONTOS: minden meccsnél, minden ciklusban újra kell számolni.
+                # Korábban ez csak eredményváltozáskor történt, ezért a cash-out
+                # üzenet átvehette az előző meccs tippjét és oddsát.
                 pred      = tip.get("prediction", "")
                 orig_odds = float(tip.get("odds") or 0)
 
-                # ĂllĂĄs vĂĄltozĂĄs detektĂĄlĂĄsa
+                # Állás változás detektálása
                 last_score = _last_scores.get(fid, (-1,-1))
                 if (hg, ag) != last_score:
-                    # Az API idĹnkĂŠnt egy rĂŠgebbi snapshotot ad vissza. Ne kĂźldjĂźnk
-                    # olyan riasztĂĄst, amelyben az ĂśsszgĂłlszĂĄm visszafelĂŠ vĂĄltozik.
+                    # Az API időnként egy régebbi snapshotot ad vissza. Ne küldjünk
+                    # olyan riasztást, amelyben az összgólszám visszafelé változik.
                     if last_score != (-1, -1) and (hg + ag) < sum(last_score):
                         log.warning(
-                            f"Elavult ĂŠlĹ ĂĄllĂĄs kihagyva ({fid}): "
+                            f"Elavult élő állás kihagyva ({fid}): "
                             f"{last_score[0]}-{last_score[1]} -> {hg}-{ag}"
                         )
                         continue
                     _last_scores[fid] = (hg, ag)
 
-                    # Railway deploy/restart utĂĄn az elsĹ lĂĄtott ĂĄllĂĄs csak
-                    # kiindulĂĄsi pont. Ne kĂźldjĂźk ki Ăşjra a meccs korĂĄbbi gĂłljĂĄt.
-                    # A kĂśvetkezĹ ciklustĂłl minden valĂłdi vĂĄltozĂĄs riasztĂĄst kap.
+                    # Railway deploy/restart után az első látott állás csak
+                    # kiindulási pont. Ne küldjük ki újra a meccs korábbi gólját.
+                    # A következő ciklustól minden valódi változás riasztást kap.
                     if last_score == (-1, -1):
                         continue
 
-                    # Events lekĂŠrĂŠse ĂĄllĂĄsvĂĄltozĂĄskor
+                    # Events lekérése állásváltozáskor
                     ev_data = football_api("fixtures/events", {"fixture": fid})
                     api_calls += 1
                     events  = []
@@ -1964,13 +2006,13 @@ def live_monitor_loop():
                             "player": {"name": ev.get("player",{}).get("name","")},
                         })
 
-                    # LegĂşjabb esemĂŠny
+                    # Legújabb esemény
                     goals_ev = [e for e in events if e["type"]=="Goal"]
                     red_ev   = [e for e in events if "Red Card" in e.get("detail","")]
 
                     situation = analyze_situation(tip, fixture, events)
 
-                    # GĂłl ĂŠrtesĂ­tĹ
+                    # Gól értesítő
                     if goals_ev:
                         last_g  = max(goals_ev, key=lambda e: e.get("minute", 0) or 0)
                         alert_k = f"{fid}_goal_{hg}_{ag}"
@@ -1979,17 +2021,17 @@ def live_monitor_loop():
                             scorer = last_g['player']['name'] or "Scorer unavailable"
                             event_detail = f"{last_g['team']['name']}: {scorer}"
                             msg = _live_message(
-                                "â˝ <b>GOAL</b>", tip, fid, home_nm, away_nm,
+                                "⚽ <b>GOAL</b>", tip, fid, home_nm, away_nm,
                                 hg, ag, minute, situation, event_detail,
                             )
                             send_telegram(
                                 msg, category="live_goal", fixture_id=fid,
-                                buttons=[("đ PICKS & ANALYSIS", TIPS_PAGE_URL)],
+                                buttons=[("📊 PICKS & ANALYSIS", TIPS_PAGE_URL)],
                             )
                             _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
-                            log.info(f"đ Goal alert: {home_nm} {hg}-{ag} {away_nm}")
+                            log.info(f"🔔 Goal alert: {home_nm} {hg}-{ag} {away_nm}")
 
-                    # Piros lap ĂŠrtesĂ­tĹ
+                    # Piros lap értesítő
                     if red_ev:
                         for rev in red_ev:
                             alert_k = f"{fid}_red_{rev['minute']}_{rev['player']['name']}"
@@ -1998,19 +2040,19 @@ def live_monitor_loop():
                                 player = rev['player']['name'] or "Player unavailable"
                                 event_detail = f"{rev['team']['name']}: {player}"
                                 msg = _live_message(
-                                    f"đĽ <b>RED CARD Âˇ {rev['minute']}'</b>",
+                                    f"🟥 <b>RED CARD · {rev['minute']}'</b>",
                                     tip, fid, home_nm, away_nm, hg, ag, minute,
                                     situation, event_detail,
                                 )
                                 send_telegram(
                                     msg, category="live_red_card", fixture_id=fid,
-                                    buttons=[("đ PICKS & ANALYSIS", TIPS_PAGE_URL)],
+                                    buttons=[("📊 PICKS & ANALYSIS", TIPS_PAGE_URL)],
                                 )
                                 _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
 
-                # DĂśntĂŠstĂĄmogatĂł jelzĂŠs: ugyanazt a szintet meccsenkĂŠnt csak egyszer
-                # kĂźldjĂźk. Ăgy 70' kĂśrĂźl lehet egy figyelmeztetĂŠs, 80' utĂĄn pedig
-                # legfeljebb egy kritikus jelzĂŠs, nem kĂźlĂśn Ăźzenet 80/85/90 percnĂŠl.
+                # Döntéstámogató jelzés: ugyanazt a szintet meccsenként csak egyszer
+                # küldjük. Így 70' körül lehet egy figyelmeztetés, 80' után pedig
+                # legfeljebb egy kritikus jelzés, nem külön üzenet 80/85/90 percnél.
                 sit = analyze_situation(tip, fixture, [])
                 previous_decision = _last_decision_state.get(fid)
                 if sit["urgency"] in {"high", "critical"} and previous_decision != sit["urgency"]:
@@ -2019,12 +2061,12 @@ def live_monitor_loop():
                     )
                     send_telegram(
                         msg, category="live_decision", fixture_id=fid,
-                        buttons=[("đ PICKS & ANALYSIS", TIPS_PAGE_URL)],
+                        buttons=[("📊 PICKS & ANALYSIS", TIPS_PAGE_URL)],
                     )
                     _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
                 _last_decision_state[fid] = sit["urgency"]
 
-                # Meccs vĂŠge
+                # Meccs vége
                 if status in {"FT","AET","PEN"}:
                     alert_k = f"{fid}_final"
                     if alert_k not in _sent_alerts:
@@ -2032,18 +2074,18 @@ def live_monitor_loop():
                         pred_map = {"home":"home","1":"home","draw":"draw","x":"draw","away":"away","2":"away"}
                         pk = pred_map.get(tip.get("prediction","").lower(),"home")
                         won = (pk=="home" and hg>ag) or (pk=="away" and ag>hg) or (pk=="draw" and hg==ag)
-                        result_icon = "â" if won else "â"
+                        result_icon = "✅" if won else "❌"
                         result_text = "WON" if won else "LOST"
-                        msg  = "đ <b>FULL TIME</b>\n"
-                        msg += "ââââââââââââââââââ\n"
-                        msg += f"đ <b>{_tg(home_nm)} {hg}â{ag} {_tg(away_nm)}</b>\n\n"
-                        msg += f"đŻ Your pick: <b>{_tg(_prediction_hu(pred))}</b>"
+                        msg  = "🏁 <b>FULL TIME</b>\n"
+                        msg += "━━━━━━━━━━━━━━━━━━\n"
+                        msg += f"🏟 <b>{_tg(home_nm)} {hg}–{ag} {_tg(away_nm)}</b>\n\n"
+                        msg += f"🎯 Your pick: <b>{_tg(_prediction_hu(pred))}</b>"
                         if orig_odds > 1:
                             msg += f" @ <b>{orig_odds:.2f}</b>"
                         msg += f"\n{result_icon} Result: <b>{result_text}</b>"
                         send_telegram(
                             msg, category="live_final", fixture_id=fid,
-                            buttons=[("đ VIEW RESULTS", TIPS_PAGE_URL)],
+                            buttons=[("📈 VIEW RESULTS", TIPS_PAGE_URL)],
                         )
                         if fid in today_tips: del today_tips[fid]
 
@@ -2063,18 +2105,18 @@ def live_monitor_loop():
             log.error(f"Live monitor ciklus hiba: {e}")
             time.sleep(60)
 
-# âââ STARTUP ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+# ─── STARTUP ──────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    """FastAPI indulĂĄskor elindĂ­tja a live monitort hĂĄttĂŠrszĂĄlon."""
+    """FastAPI induláskor elindítja a live monitort háttérszálon."""
     if FOOTBALL_API_KEY:
         t = threading.Thread(target=live_monitor_loop, daemon=True)
         t.start()
-        log.info("â Live Monitor hĂĄttĂŠrszĂĄl elindĂ­tva")
+        log.info("✅ Live Monitor háttérszál elindítva")
     else:
-        log.warning("â ď¸ FOOTBALL_API_KEY hiĂĄnyzik â Live Monitor nem indul!")
+        log.warning("⚠️ FOOTBALL_API_KEY hiányzik – Live Monitor nem indul!")
 
-# âââ ĂJ: uvicorn indulĂł parancs (korĂĄbban hiĂĄnyzott!) âââââââââââââââââââââââââ
+# ─── ÚJ: uvicorn induló parancs (korábban hiányzott!) ─────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
