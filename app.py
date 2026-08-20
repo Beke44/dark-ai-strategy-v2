@@ -1620,6 +1620,18 @@ def check_and_notify_new_tips():
     if not new_tips:
         return
 
+    # ÚJ: mielőtt kiküldjük a mai új tippeket, elküldjük a TEGNAPI eredményeket.
+    # Így mindig friss, lezárt eredménnyel megy ki (mert te előbb frissíted az
+    # eredményeket, aztán indítod az elemzést), és aznap csak egyszer.
+    global _last_daily_recap_date
+    _recap_today_iso = date.today().isoformat()
+    if _last_daily_recap_date != _recap_today_iso:
+        try:
+            send_yesterday_recap()
+        except Exception as _recap_e:
+            log.error(f"Tegnapi összesítő (új tippeknél) hiba: {_recap_e}")
+        _last_daily_recap_date = _recap_today_iso
+
     pred_label_map = {"home": "Home", "draw": "Draw", "away": "Away"}
 
     # Keep the source of Telegram formatting ASCII-only.  GitHub's web editor
@@ -1913,15 +1925,7 @@ def live_monitor_loop():
                 _last_daily_maintenance_date = today_iso
             # ────────────────────────────────────────────────────────────────────────
 
-            # ─── ÚJ: "Tegnapi eredmények" napi összesítő (nem töröl semmit) ───────────
-            global _last_daily_recap_date
-            if _last_daily_recap_date != today_iso:
-                try:
-                    send_yesterday_recap()
-                except Exception as _recap_e:
-                    log.error(f"Tegnapi összesítő hiba: {_recap_e}")
-                _last_daily_recap_date = today_iso
-            # ────────────────────────────────────────────────────────────────────────
+
 
             # ─── ÚJ: "Új tipp" azonnali értesítés ellenőrzése ─────────────────────────
             global _last_new_tip_check
