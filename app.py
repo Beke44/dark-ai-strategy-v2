@@ -13,8 +13,9 @@ VAGY: ezt töltsd fel app.py névvel a GitHub-ra.
 """
 
 import os, sys, json, logging, requests, time, threading, functools, hmac, html
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 # FastAPI
@@ -32,6 +33,7 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID", "")
 API_BASE         = "https://v3.football.api-sports.io"
 TIPS_PAGE_URL    = os.getenv("TIPS_PAGE_URL", "https://darkaistrategy.com/tips")
+BUDAPEST_TZ      = ZoneInfo("Europe/Budapest")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +77,39 @@ async def require_server_api_key(request: Request, call_next):
 def get_sb():
     from supabase import create_client
     return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def _budapest_today() -> date:
+    """A napi tippek és recap-ek mindig magyar idő szerint számolódnak."""
+    return datetime.now(BUDAPEST_TZ).date()
+
+
+def _local_day_bounds_utc(day_value: date) -> tuple[str, str]:
+    """Budapesti naptári napból Supabase-hez használható UTC intervallum."""
+    start = datetime.combine(day_value, datetime.min.time(), tzinfo=BUDAPEST_TZ)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(timezone.utc).isoformat(),
+        end.astimezone(timezone.utc).isoformat(),
+    )
+
+
+def _tips_for_budapest_day(tips: list[dict], target_day: date) -> list[dict]:
+    """A created_at UTC időbélyeget Budapest szerinti napra fordítja."""
+    selected = []
+    for tip in tips:
+        raw = str(tip.get("created_at") or "")
+        try:
+            created = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created.astimezone(BUDAPEST_TZ).date() == target_day:
+                selected.append(tip)
+        except (ValueError, TypeError):
+            # Régi, hibás soroknál maradjon a korábbi, dátum-stringes viselkedés.
+            if raw[:10] == target_day.isoformat():
+                selected.append(tip)
+    return selected
 
 def football_api(endpoint: str, params: dict = {}) -> dict:
     try:
@@ -633,20 +668,24 @@ def tips_by_status(status: str = "pending", limit: int = 30):
 @app.get("/api/tips/today")
 def tips_today():
     try:
-        sb     = get_sb()
-        today  = date.today().isoformat()
-        result = sb.table("tips").select("*").order(
-            "created_at", desc=True).limit(200).execute()
-        all_tips = result.data or []
-        pending  = [t for t in all_tips
-                   if str(t.get("created_at",""))[:10] == today
-                   and t.get("result_status") not in ["Win","Lost"]]
-        closed   = [t for t in all_tips
-                   if t.get("result_status") in ["Win","Lost"]][:20]
+        sb = get_sb()
+        today = _budapest_today()
+        start_utc, end_utc = _local_day_bounds_utc(today)
+        result = (
+            sb.table("tips").select("*")
+            .gte("created_at", start_utc).lt("created_at", end_utc)
+            .order("created_at", desc=True).limit(500).execute()
+        )
+        pending = [t for t in (result.data or [])
+                   if t.get("result_status") not in ["Win", "Lost", "Void"]]
+        recent_result = sb.table("tips").select("*").in_(
+            "result_status", ["Win", "Lost"]
+        ).order("created_at", desc=True).limit(20).execute()
+        closed = recent_result.data or []
         pending  = _enrich_tips_with_logos(pending)  # ÚJ: logók hozzáadása
         closed   = _enrich_tips_with_logos(closed)   # ÚJ: logók hozzáadása
         return {
-            "date":          today,
+            "date":          today.isoformat(),
             "pending":       pending,
             "closed":        closed,
             "pending_count": len(pending),
@@ -1494,6 +1533,7 @@ _last_daily_recap_date = None        # dátum, amikor utoljára lefutott a "tegn
 _last_new_tip_check = 0              # timestamp, mikor néztük utoljára az új tippeket
 
 NEW_TIP_CHECK_INTERVAL_SEC = 120  # ennyi másodpercenként nézzük meg, van-e új, be nem jelentett tipp
+NEW_TIP_QUIET_PERIOD_SEC = 600    # csak 10 perc írási csend után küldünk digestet
 
 TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram üzenetek
 
@@ -1543,7 +1583,12 @@ def build_daily_summary_message(target_date: str) -> str:
         log.error(f"Napi összesítő - tips lekérés hiba: {e}")
         return None
 
-    day_tips = [t for t in all_tips if str(t.get("created_at", ""))[:10] == target_date]
+    try:
+        report_day = date.fromisoformat(target_date)
+    except ValueError:
+        log.error(f"Napi összesítő - érvénytelen dátum: {target_date}")
+        return None
+    day_tips = _tips_for_budapest_day(all_tips, report_day)
     if not day_tips:
         return None
 
@@ -1565,22 +1610,41 @@ def build_daily_summary_message(target_date: str) -> str:
     return msg
 
 
-def send_yesterday_recap():
+def _recap_already_sent(report_date: str) -> bool:
+    """Tartós idempotencia: deploy/restart után sem megy ki ugyanaz a recap."""
+    try:
+        result = get_sb().table("telegram_messages").select("id").eq(
+            "category", f"yesterday_recap:{report_date}"
+        ).limit(1).execute()
+        return bool(result.data)
+    except Exception as exc:
+        log.error(f"Recap idempotencia ellenőrzés hiba: {exc}")
+        return False
+
+
+def send_yesterday_recap(report_date: str = None) -> dict:
     """
     ÚJ: minden nap egyszer elküldi a TEGNAPI nap eredményeit
     (tét ajánlásos / nem-ajánlásos bontásban) - ez FÜGGETLEN a
     2 napos törlési logikától, csak informatív, semmit nem töröl.
     """
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    yesterday = report_date or (_budapest_today() - timedelta(days=1)).isoformat()
+    try:
+        report_day = date.fromisoformat(yesterday)
+    except ValueError:
+        return {"status": "error", "detail": "invalid_report_date"}
+
+    if _recap_already_sent(yesterday):
+        return {"status": "already_sent", "report_date": yesterday}
     try:
         all_tips = fetch_all_tips()
     except Exception as e:
         log.error(f"Tegnapi összesítő - tips lekérés hiba: {e}")
-        return
+        return {"status": "error", "detail": "tips_query_failed"}
 
-    day_tips = [t for t in all_tips if str(t.get("created_at", ""))[:10] == yesterday]
+    day_tips = _tips_for_budapest_day(all_tips, report_day)
     if not day_tips:
-        return  # nem küldünk üres üzenetet, ha tegnap nem volt tipp
+        return {"status": "no_tips", "report_date": yesterday}
 
     recommended = [t for t in day_tips if _is_recommended_tip(t)]
     normal      = [t for t in day_tips if not _is_recommended_tip(t)]
@@ -1595,7 +1659,16 @@ def send_yesterday_recap():
     msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
     msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
     msg += f"  💰 Total profit: {n['profit']:+,.0f} coin"
-    send_telegram(msg, category="yesterday_recap")
+    message_id = send_telegram(msg, category=f"yesterday_recap:{yesterday}")
+    if not message_id:
+        return {"status": "error", "detail": "telegram_send_failed"}
+    return {"status": "sent", "report_date": yesterday, "message_id": message_id}
+
+
+@app.post("/api/telegram/yesterday-recap")
+def telegram_yesterday_recap(report_date: str = None):
+    """A helyi statisztika-frissítés ezt hívja, a Railway API-kulccsal védve."""
+    return send_yesterday_recap(report_date=report_date)
 
 
 def check_and_notify_new_tips():
@@ -1611,7 +1684,7 @@ def check_and_notify_new_tips():
         sb = get_sb()
         result = sb.table("tips").select("*").eq(
             "telegram_notified", False
-        ).order("created_at", desc=False).limit(50).execute()
+        ).order("created_at", desc=False).limit(200).execute()
         new_tips = result.data or []
     except Exception as e:
         log.error(f"Új tipp ellenőrzés hiba: {e}")
@@ -1620,17 +1693,21 @@ def check_and_notify_new_tips():
     if not new_tips:
         return
 
-    # ÚJ: mielőtt kiküldjük a mai új tippeket, elküldjük a TEGNAPI eredményeket.
-    # Így mindig friss, lezárt eredménnyel megy ki (mert te előbb frissíted az
-    # eredményeket, aztán indítod az elemzést), és aznap csak egyszer.
-    global _last_daily_recap_date
-    _recap_today_iso = date.today().isoformat()
-    if _last_daily_recap_date != _recap_today_iso:
-        try:
-            send_yesterday_recap()
-        except Exception as _recap_e:
-            log.error(f"Tegnapi összesítő (új tippeknél) hiba: {_recap_e}")
-        _last_daily_recap_date = _recap_today_iso
+    # A Streamlit elemzés közben soronként ment. Várjuk meg, amíg 10 perce
+    # nem érkezett új sor, különben 8/44/13-as részletekben menne ki a digest.
+    try:
+        newest_raw = max(str(t.get("created_at") or "") for t in new_tips)
+        newest = datetime.fromisoformat(newest_raw.replace("Z", "+00:00"))
+        if newest.tzinfo is None:
+            newest = newest.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - newest.astimezone(timezone.utc)).total_seconds()
+        if age < NEW_TIP_QUIET_PERIOD_SEC:
+            log.info(
+                "Új tippek még érkeznek (utolsó: %.0f mp); Telegram digest vár.", age
+            )
+            return
+    except (ValueError, TypeError) as exc:
+        log.warning("Új tipp quiet-period ellenőrzés kihagyva: %s", exc)
 
     pred_label_map = {"home": "Home", "draw": "Draw", "away": "Away"}
 
@@ -1668,6 +1745,7 @@ def check_and_notify_new_tips():
     NOTIFY_INDIVIDUAL_THRESHOLD = 3  # ennél kevesebb új tippnél még egyenként küldünk
 
     if len(new_tips) <= NOTIFY_INDIVIDUAL_THRESHOLD:
+        sent_tips = []
         for tip in new_tips:
             try:
                 pred_label = pred_label_map.get(tip.get("prediction"), tip.get("prediction", ""))
@@ -1701,15 +1779,17 @@ def check_and_notify_new_tips():
                     "\n\n<i>For information only. 18+ "
                     f"{tg['middle_dot']} Gamble responsibly.</i>"
                 )
-                send_telegram(
+                message_id = send_telegram(
                     msg,
                     category="new_tip",
                     fixture_id=tip.get("fixture_id"),
                     buttons=[(f"{tg['chart']} VIEW FULL ANALYSIS", TIPS_PAGE_URL)],
                 )
+                if message_id:
+                    sent_tips.append(tip)
             except Exception as e:
                 log.error(f"New tip alert error (id={tip.get('id')}): {e}")
-        _mark_notified(new_tips)
+        _mark_notified(sent_tips)
     else:
         # Many new tips at once -> single digest message
         try:
@@ -1744,14 +1824,15 @@ def check_and_notify_new_tips():
                 f"<i>18+ {tg['middle_dot']} Gamble responsibly. "
                 "Picks are for information only.</i>"
             )
-            send_telegram(
+            message_id = send_telegram(
                 msg,
                 category="new_tip_digest",
                 buttons=[(f"{tg['chart']} ALL PICKS & ANALYSIS", TIPS_PAGE_URL)],
             )
+            if message_id:
+                _mark_notified(new_tips)
         except Exception as e:
             log.error(f"Összesített új tipp értesítés hiba: {e}")
-        _mark_notified(new_tips)
 
 
 def delete_old_telegram_messages(older_than_date: str):
@@ -1924,8 +2005,6 @@ def live_monitor_loop():
                     log.error(f"Napi Telegram karbantartás hiba: {_maint_e}")
                 _last_daily_maintenance_date = today_iso
             # ────────────────────────────────────────────────────────────────────────
-
-
 
             # ─── ÚJ: "Új tipp" azonnali értesítés ellenőrzése ─────────────────────────
             global _last_new_tip_check
