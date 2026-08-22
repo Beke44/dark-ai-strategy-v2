@@ -1876,16 +1876,13 @@ def delete_old_telegram_messages(older_than_date: str):
 def run_daily_telegram_maintenance():
     """
     Naponta egyszer lefutó karbantartás:
-    1. Elküldi az összesítőt arra a napra, ami most válik "régivé"
-       (a megőrzési határ napja).
-    2. Törli a csatornából az annál a napnál régebbi egyedi üzeneteket.
+    Törli a csatornából a megőrzési időnél régebbi egyedi üzeneteket.
+
+    Az eredmény-összesítőt NEM innen küldjük: azt kizárólag a helyi
+    Statisztikák / Frissítés indítja, miután a lezárt meccsek eredményei
+    már felkerültek a Supabase-be.
     """
     purge_date = (date.today() - timedelta(days=TELEGRAM_RETENTION_DAYS)).isoformat()
-
-    summary_msg = build_daily_summary_message(purge_date)
-    if summary_msg:
-        send_telegram(summary_msg, category="daily_summary")
-
     delete_old_telegram_messages(purge_date)
 
 
