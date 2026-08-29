@@ -528,6 +528,12 @@ def health():
     }
 
 @app.get("/api/stats/public")
+@simple_cache(180)  # TERHELÉS-JAVÍTÁS (2026-08-29): korábban minden kérésnél élőben
+                     # lekérdezte a teljes lezárt tipp-történetet a Supabase-ből -
+                     # 100 egyidejű látogatónál ez 100 párhuzamos Supabase-lekérdezést
+                     # jelentett, ami 502 hibákhoz és 9-12 mp-es válaszidőkhöz vezetett.
+                     # A statisztika úgysem változik másodpercenként, 3 perces cache
+                     # biztonságos, és 100 egyidejű kérésből 1 valódi lekérdezést csinál.
 def public_stats():
     try:
         # MÓDOSÍTVA: lapozott lekérdezés, hogy 1000-nél több lezárt tippet is
