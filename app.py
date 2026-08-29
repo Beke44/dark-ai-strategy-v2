@@ -150,8 +150,25 @@ def fetch_all_tips(status_filter=None, page_size: int = 1000, max_pages: int = 2
 # ehelyett egy rövid ideig (a TTL alatt) a memóriában tárolt választ adjuk
 # vissza mindenkinek. Egyszerű, de hatékony megoldás egyetlen Railway
 # instance mellett (jelenleg 1 replica fut).
+#
+# MEMÓRIA-JAVÍTÁS (2026-08-29): a cache korábban SOSEM törölt bejegyzést -
+# minden egyedi (függvény, argumentumok) kombináció (pl. minden lekérdezett
+# fixture_id/dátum) örökre bent maradt a memóriában, még a TTL lejárta után
+# is. Egy 24/7 futó Railway worker esetén ez napok/hetek alatt folyamatosan
+# növekvő memóriahasználatot és végül OOM-ot (Out of Memory) okozott.
+# Mostantól minden új bejegyzés beszúrásakor kitakarítjuk a saját TTL-jük
+# többszörösénél régebbi, tehát biztosan elavult bejegyzéseket.
 _endpoint_cache = {}
 _endpoint_cache_lock = threading.Lock()
+_ENDPOINT_CACHE_STALE_MULTIPLIER = 3  # a TTL hányszorosa után számít "biztosan elavultnak" egy bejegyzés
+
+def _cleanup_endpoint_cache(now: float):
+    stale_keys = [
+        k for k, v in _endpoint_cache.items()
+        if now - v["ts"] > v.get("ttl", 300) * _ENDPOINT_CACHE_STALE_MULTIPLIER
+    ]
+    for k in stale_keys:
+        del _endpoint_cache[k]
 
 def cached_call(key: str, ttl_seconds: int, fn, *args, **kwargs):
     now = time.time()
@@ -161,7 +178,8 @@ def cached_call(key: str, ttl_seconds: int, fn, *args, **kwargs):
             return cached["data"]
     result = fn(*args, **kwargs)
     with _endpoint_cache_lock:
-        _endpoint_cache[key] = {"data": result, "ts": now}
+        _endpoint_cache[key] = {"data": result, "ts": now, "ttl": ttl_seconds}
+        _cleanup_endpoint_cache(now)
     return result
 
 def simple_cache(ttl_seconds: int):
