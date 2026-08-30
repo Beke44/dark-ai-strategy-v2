@@ -1815,45 +1815,83 @@ def check_and_notify_new_tips():
                 log.error(f"New tip alert error (id={tip.get('id')}): {e}")
         _mark_notified(sent_tips)
     else:
-        # Many new tips at once -> single digest message
+        # Many new tips at once -> full digest, split across multiple
+        # Telegram messages if needed (Telegram's hard limit is 4096
+        # characters per message).
         try:
             recommended = [t for t in new_tips if _is_recommended_tip(t)]
             observation = [t for t in new_tips if not _is_recommended_tip(t)]
-            msg  = f"{tg['football']} <b>DARK AI STRATEGY</b>\n"
-            msg += f"<b>{len(new_tips)} NEW PICKS</b>\n"
-            msg += f"{tg['divider']}\n"
-            msg += f"{tg['diamond']} Stake recommended: <b>{len(recommended)}</b>\n"
-            msg += f"{tg['eye']} Watchlist: <b>{len(observation)}</b>\n"
 
-            def append_group(title, icon, rows, limit):
-                nonlocal msg
-                if not rows:
-                    return
-                msg += f"\n<b>{icon} {title}</b>\n\n"
-                for idx, tip in enumerate(rows[:limit], 1):
-                    pred_label = pred_label_map.get(tip.get("prediction"), tip.get("prediction", ""))
-                    msg += (
-                        f"{idx}. <b>{_tg(tip.get('home_team'))} {tg['dash']} "
-                        f"{_tg(tip.get('away_team'))}</b>\n"
-                        f"   {tg['target']} {_tg(pred_label)}  {tg['bullet']}  "
-                        f"<b>{float(tip.get('odds') or 0):.2f}</b>\n"
-                    )
-                if len(rows) > limit:
-                    msg += f"   <i>+{len(rows) - limit} more picks on the website</i>\n"
+            def _format_row(idx, tip, with_stake):
+                pred_label = pred_label_map.get(tip.get("prediction"), tip.get("prediction", ""))
+                row = (
+                    f"{idx}. <b>{_tg(tip.get('home_team'))} {tg['dash']} "
+                    f"{_tg(tip.get('away_team'))}</b>\n"
+                    f"   {tg['target']} {_tg(pred_label)}  {tg['bullet']}  "
+                    f"<b>{float(tip.get('odds') or 0):.2f}</b>\n"
+                )
+                if with_stake:
+                    stake = float(tip.get("rec_stake") or 0)
+                    if stake > 0:
+                        row += f"   {tg['money']} Stake: <b>{stake:,.0f} coin</b>\n"
+                return row
 
-            append_group("STAKE-RECOMMENDED PICKS", tg["diamond"], recommended, 10)
-            append_group("WATCHLIST", tg["eye"], observation, 8)
-            msg += f"\n{tg['divider']}\n"
-            msg += (
+            rows = []
+            if recommended:
+                rows.append(f"\n<b>{tg['diamond']} STAKE-RECOMMENDED PICKS</b>\n\n")
+                for i, t in enumerate(recommended, 1):
+                    rows.append(_format_row(i, t, with_stake=True))
+            if observation:
+                rows.append(f"\n<b>{tg['eye']} WATCHLIST</b>\n\n")
+                for i, t in enumerate(observation, 1):
+                    rows.append(_format_row(i, t, with_stake=False))
+
+            summary = (
+                f"{tg['football']} <b>DARK AI STRATEGY</b>\n"
+                f"<b>{len(new_tips)} NEW PICKS</b>\n"
+                f"{tg['divider']}\n"
+                f"{tg['diamond']} Stake recommended: <b>{len(recommended)}</b>\n"
+                f"{tg['eye']} Watchlist: <b>{len(observation)}</b>\n"
+            )
+            footer = (
+                f"\n{tg['divider']}\n"
                 f"<i>18+ {tg['middle_dot']} Gamble responsibly. "
                 "Picks are for information only.</i>"
             )
-            message_id = send_telegram(
-                msg,
-                category="new_tip_digest",
-                buttons=[(f"{tg['chart']} ALL PICKS & ANALYSIS", TIPS_PAGE_URL)],
-            )
-            if message_id:
+
+            MAX_LEN = 3500  # safety margin under Telegram's 4096-char hard limit
+
+            # Split the rows across as few messages as possible while staying
+            # under MAX_LEN. The first chunk also carries the summary header.
+            chunks = []
+            current = summary
+            for text in rows:
+                if len(current) + len(text) > MAX_LEN and current.strip():
+                    chunks.append(current)
+                    current = ""
+                current += text
+            if current.strip():
+                chunks.append(current)
+            if not chunks:
+                chunks = [summary]
+            chunks[-1] += footer
+
+            total_parts = len(chunks)
+            sent_any = False
+            for part_no, chunk in enumerate(chunks, 1):
+                part_msg = chunk
+                if total_parts > 1:
+                    part_msg = f"<i>(part {part_no}/{total_parts})</i>\n" + part_msg
+                message_id = send_telegram(
+                    part_msg,
+                    category="new_tip_digest",
+                    buttons=[(f"{tg['chart']} ALL PICKS & ANALYSIS", TIPS_PAGE_URL)]
+                    if part_no == total_parts else None,
+                )
+                if message_id:
+                    sent_any = True
+
+            if sent_any:
                 _mark_notified(new_tips)
         except Exception as e:
             log.error(f"Összesített új tipp értesítés hiba: {e}")
