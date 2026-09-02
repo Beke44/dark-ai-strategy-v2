@@ -1563,16 +1563,29 @@ TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram üzen
 
 
 def _is_recommended_tip(t: dict) -> bool:
-    """Ugyanaz a logika, mint a Lovable frontend szűrője:
-    egy tipp akkor számít 'tét ajánlásosnak', ha van Kelly-tét,
-    value bet jelzés, vagy smart_pro elfogadás."""
+    """Egy tipp akkor számít ténylegesen 'tét ajánlásosnak', ha az AI
+    valódi tétet is rendelt hozzá (rec_stake > 0). Ez ugyanaz a
+    definíció, mint amit a dark_ai_strategy.py már használ az elfogadott
+    tippek összegyűjtésénél ("smart_pro_accepted == True és stake > 0",
+    lásd ottani 3409-3417. sor) -- a rec_stake ott csak akkor > 0, ha a
+    meccs átment a smart_pro szűrőn ÉS a napi tét-limit (max_bets_per_day)
+    is engedte, tehát önmagában már mindkét feltételt magában foglalja.
+
+    JAVÍTVA (2026-09-02): korábban ez a függvény négyes VAGY-kapcsolattal
+    (rec_stake>0 VAGY kelly_fraction>0 VAGY is_value_bet VAGY smart_pro)
+    a Lovable frontend PRÉMIUM-MEZŐ szűrőjét másolta ide -- az ottani cél
+    más: "van-e BÁRMILYEN prémium jelző, amit el kell rejteni a free
+    usertől". Ez a napi Telegram összesítőben viszont túlszámolta a
+    ténylegesen ajánlott tippeket (pl. 2026-09-01: Telegram 12-t mutatott
+    "Stake-recommended"-ként, miközben a napi PDF riport szerint valójában
+    csak 1 tippnek volt tényleges tétje) -- olyan meccsek is bekerültek,
+    amik csak átmentek a minőségi szűrőn (smart_pro=True) vagy volt
+    valamennyi value edge-jük (is_value_bet=True), de a napi tét-limit
+    miatt sosem kaptak tényleges tétet. A kelly_fraction is kizárólag a
+    rec_stake bankroll-arányos átskálázása (dark_ai_strategy.py 12885-12888.
+    sor), nem önálló jelzés."""
     try:
-        return bool(
-            (t.get("rec_stake") and float(t.get("rec_stake") or 0) > 0) or
-            (t.get("kelly_fraction") and float(t.get("kelly_fraction") or 0) > 0) or
-            t.get("is_value_bet") is True or
-            t.get("smart_pro") is True
-        )
+        return float(t.get("rec_stake") or 0) > 0
     except Exception:
         return False
 
