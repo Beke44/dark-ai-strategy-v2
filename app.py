@@ -1555,11 +1555,17 @@ _last_decision_state = {}  # fixture_id -> utoljára kiküldött döntési szint
 _last_daily_maintenance_date = None  # dátum, amikor utoljára lefutott a napi Telegram-karbantartás (törlés)
 _last_daily_recap_date = None        # dátum, amikor utoljára lefutott a "tegnapi eredmények" összesítő
 _last_new_tip_check = 0              # timestamp, mikor néztük utoljára az új tippeket
+_last_intraday_check = 0             # timestamp, mikor néztük utoljára, kell-e napközbeni összefoglaló
 
 NEW_TIP_CHECK_INTERVAL_SEC = 120  # ennyi másodpercenként nézzük meg, van-e új, be nem jelentett tipp
 NEW_TIP_QUIET_PERIOD_SEC = 600    # csak 10 perc írási csend után küldünk digestet
 
 TELEGRAM_RETENTION_DAYS = 2  # ennyi napig maradnak meg az egyedi Telegram üzenetek
+
+# ÚJ: napközbeni "hogy állunk" összefoglaló - ezekben az órákban (magyar idő)
+# küldünk legfeljebb egyet-egyet, kb. 2 óránként, amíg van aznapi tipp.
+INTRADAY_UPDATE_HOURS = {14, 16, 18, 20, 22}
+INTRADAY_CHECK_INTERVAL_SEC = 300  # ennyi másodpercenként nézzük meg, van-e itt az ideje
 
 
 def _is_recommended_tip(t: dict) -> bool:
@@ -1647,23 +1653,161 @@ def build_daily_summary_message(target_date: str) -> str:
     return msg
 
 
-def _recap_already_sent(report_date: str) -> bool:
-    """Tartós idempotencia: deploy/restart után sem megy ki ugyanaz a recap."""
+def _telegram_category_sent(category: str, prefix: bool = False) -> bool:
+    """
+    Általános, tartós idempotencia-ellenőrzés a telegram_messages táblán:
+    deploy/restart után sem megy ki kétszer ugyanaz az üzenet.
+    `prefix=True` esetén minden olyan kategóriát talált egyezésnek tekint,
+    ami `category`-val kezdődik (pl. több részre darabolt üzenetsorozatnál,
+    ahol minden résznek saját "...:{part}" utótagja van).
+    """
     try:
-        result = get_sb().table("telegram_messages").select("id").eq(
-            "category", f"yesterday_recap:{report_date}"
-        ).limit(1).execute()
+        q = get_sb().table("telegram_messages").select("id")
+        q = q.like("category", f"{category}%") if prefix else q.eq("category", category)
+        result = q.limit(1).execute()
         return bool(result.data)
     except Exception as exc:
-        log.error(f"Recap idempotencia ellenőrzés hiba: {exc}")
+        log.error(f"Telegram idempotencia ellenőrzés hiba ({category}): {exc}")
         return False
+
+
+def _recap_already_sent(report_date: str) -> bool:
+    """Tartós idempotencia: deploy/restart után sem megy ki ugyanaz a recap."""
+    return _telegram_category_sent(f"yesterday_recap:{report_date}")
+
+
+def _pick_label(prediction) -> str:
+    return {"home": "Home", "draw": "Draw", "away": "Away"}.get(prediction, prediction or "")
+
+
+def _result_badge(tip: dict) -> str:
+    """Egy tipp aktuális állapotának rövid, emojis jelzése a listás üzenetekhez."""
+    status = tip.get("result_status")
+    if status == "Win":
+        return "✅ WON"
+    if status == "Lost":
+        return "❌ LOST"
+    if status == "Void":
+        return "⚪ VOID"
+    return "⏳ PENDING"
+
+
+def _competition_type(league_name) -> str:
+    """Egyszerű Kupa/Liga besorolás a liga nevéből - ugyanaz a logika, mint
+    a dark_ai_strategy.py get_competition_type() függvénye, csak angolul,
+    a Telegram üzenetek nyelvéhez igazítva."""
+    name = str(league_name or "").lower()
+    if any(w in name for w in ("champions league", "europa league", "conference league", "ucl", "uel")):
+        return "Euro Cup"
+    if "world cup" in name or ("euro" in name and "league" not in name):
+        return "International"
+    if any(w in name for w in ("cup", "pokal", "coppa", "copa", "trophy", "shield")):
+        return "Cup"
+    return "League"
+
+
+@simple_cache(ttl_seconds=6 * 3600)
+def _get_fixture_kickoff_iso(fixture_id: int):
+    """
+    ÚJ: egy fixture pontos kezdési időpontja (ISO, UTC) a Football API-ból.
+    A `tips` táblában nincs eltárolva kezdési idő, csak a fixture_id - ezt
+    használjuk fel, hogy a meccslistás Telegram üzenetben ki tudjuk írni a
+    kezdési időt is. None, ha nem sikerül lekérni (pl. törölt/régi meccs).
+    Hosszú (6 órás) cache, mert egy lezajlott meccs kezdési ideje értelemszerűen
+    nem változik, így nem érdemes minden hívásnál újra lekérni az API-ból.
+    """
+    try:
+        data = football_api("fixtures", {"id": fixture_id})
+        resp = data.get("response") or []
+        if not resp:
+            return None
+        return resp[0].get("fixture", {}).get("date")
+    except Exception:
+        return None
+
+
+def _kickoff_cet_str(tip: dict):
+    """A tipp fixture_id-jából lekért kezdési idő CET/CEST (Europe/Budapest)
+    időben, 'HH:MM' formában - vagy None, ha nem állapítható meg."""
+    fid = tip.get("fixture_id")
+    if not fid:
+        return None
+    iso = _get_fixture_kickoff_iso(int(fid))
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(BUDAPEST_TZ).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return None
+
+
+def build_match_list_chunks(recommended: list, normal: list, label_date: str) -> list:
+    """
+    ÚJ: az adott nap ÖSSZES meccsét felsoroló Telegram üzenet(ek) - csapatok,
+    fő tipp, odds, majd a végeredmény ✅/❌/⚪ jelöléssel -, ugyanabban a
+    Stake-recommended / Watchlist bontásban, mint az új-tipp digest
+    (check_and_notify_new_tips). A napi összesítő (send_yesterday_recap)
+    UTÁN, második üzenetként megy ki, hogy az admin/követők meccsenként is
+    lássák, mi hozta be vagy bukta a napot, ne csak az össz-számokat.
+    Telegram 4096 karakteres limitje miatt szükség esetén több részre
+    daraboljuk, ugyanazzal a mintával, mint a meglévő digest-küldés.
+    """
+    divider = "━" * 18
+
+    def _row(idx, tip):
+        kickoff   = _kickoff_cet_str(tip)
+        time_part = f"  🕐 {kickoff} CET" if kickoff else ""
+        league    = _tg(tip.get("league") or "Unknown league")
+        comp_type = _competition_type(tip.get("league"))
+        return (
+            f"{idx}. <b>{_tg(tip.get('home_team'))} – {_tg(tip.get('away_team'))}</b>{time_part}\n"
+            f"   🏆 {league} ({comp_type})  ·  🎯 {_tg(_pick_label(tip.get('prediction')))} · "
+            f"<b>{float(tip.get('odds') or 0):.2f}</b>  ·  {_result_badge(tip)}\n"
+        )
+
+    rows = []
+    if recommended:
+        rows.append("\n<b>💎 STAKE-RECOMMENDED PICKS</b>\n\n")
+        for i, t in enumerate(recommended, 1):
+            rows.append(_row(i, t))
+    if normal:
+        rows.append("\n<b>👁 WATCHLIST</b>\n\n")
+        for i, t in enumerate(normal, 1):
+            rows.append(_row(i, t))
+
+    header = f"📋 <b>Match Results – {label_date}</b>\n{divider}\n"
+    footer = f"\n{divider}\n<i>18+ · Gamble responsibly.</i>"
+
+    MAX_LEN = 3500  # biztonsági margó Telegram 4096-os hard limitje alatt
+    chunks, current = [], header
+    for text in rows:
+        if len(current) + len(text) > MAX_LEN and current.strip():
+            chunks.append(current)
+            current = ""
+        current += text
+    if current.strip():
+        chunks.append(current)
+    if not chunks:
+        chunks = [header]
+    chunks[-1] += footer
+    return chunks
 
 
 def send_yesterday_recap(report_date: str = None) -> dict:
     """
-    ÚJ: minden nap egyszer elküldi a TEGNAPI nap eredményeit
-    (tét ajánlásos / nem-ajánlásos bontásban) - ez FÜGGETLEN a
-    2 napos törlési logikától, csak informatív, semmit nem töröl.
+    Minden nap egyszer elküldi a TEGNAPI nap eredményeit KÉT üzenetben
+    (ez FÜGGETLEN a 2 napos törlési logikától, csak informatív, semmit
+    nem töröl):
+      1) összesítő - tét ajánlásos / nem-ajánlásos bontásban, darabszám
+         + nyert/vesztett + profit (ugyanaz, mint eddig volt).
+      2) ÚJ: a nap ÖSSZES meccse egyenként felsorolva - csapatok, fő
+         tipp, majd a ✅ Won / ❌ Lost eredmény -, ugyanabban a bontásban.
+    A két üzenet külön van nyilván tartva (lásd _telegram_category_sent),
+    hogy ha valamelyik elküldése közben megszakadna a folyamat, a
+    következő hívás csak a hiányzó részt küldje el újra, ne duplikáljon.
     """
     yesterday = report_date or (_budapest_today() - timedelta(days=1)).isoformat()
     try:
@@ -1671,8 +1815,13 @@ def send_yesterday_recap(report_date: str = None) -> dict:
     except ValueError:
         return {"status": "error", "detail": "invalid_report_date"}
 
-    if _recap_already_sent(yesterday):
+    summary_category      = f"yesterday_recap:{yesterday}"
+    list_category_prefix  = f"yesterday_recap_list:{yesterday}"
+    summary_sent = _telegram_category_sent(summary_category)
+    list_sent    = _telegram_category_sent(list_category_prefix, prefix=True)
+    if summary_sent and list_sent:
         return {"status": "already_sent", "report_date": yesterday}
+
     try:
         all_tips = fetch_all_tips()
     except Exception as e:
@@ -1686,26 +1835,123 @@ def send_yesterday_recap(report_date: str = None) -> dict:
     recommended = [t for t in day_tips if _is_recommended_tip(t)]
     normal      = [t for t in day_tips if not _is_recommended_tip(t)]
 
-    r = _summarize_tip_group(recommended)
-    n = _summarize_tip_group(normal)
+    if not summary_sent:
+        r = _summarize_tip_group(recommended)
+        n = _summarize_tip_group(normal)
 
-    msg  = f"🌅 <b>Yesterday's Results – {yesterday}</b>\n\n"
-    msg += f"💎 <b>Stake-recommended tips</b> ({r['total']})\n"
-    msg += f"  ✅ {r['wins']} won / ❌ {r['losses']} lost (win rate: {r['win_rate']}%)\n"
-    msg += f"  💰 Total profit: {r['profit']:+,.0f} coin\n\n"
-    msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
-    msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
-    msg += f"  💰 Total profit: {n['profit']:+,.0f} coin"
-    message_id = send_telegram(msg, category=f"yesterday_recap:{yesterday}")
-    if not message_id:
-        return {"status": "error", "detail": "telegram_send_failed"}
-    return {"status": "sent", "report_date": yesterday, "message_id": message_id}
+        msg  = f"🌅 <b>Yesterday's Results – {yesterday}</b>\n\n"
+        msg += f"💎 <b>Stake-recommended tips</b> ({r['total']})\n"
+        msg += f"  ✅ {r['wins']} won / ❌ {r['losses']} lost (win rate: {r['win_rate']}%)\n"
+        msg += f"  💰 Total profit: {r['profit']:+,.0f} coin\n\n"
+        msg += f"📋 <b>Non-recommended tips</b> ({n['total']})\n"
+        msg += f"  ✅ {n['wins']} won / ❌ {n['losses']} lost (win rate: {n['win_rate']}%)\n"
+        msg += f"  💰 Total profit: {n['profit']:+,.0f} coin"
+        message_id = send_telegram(msg, category=summary_category)
+        if not message_id:
+            return {"status": "error", "detail": "telegram_send_failed_summary"}
+
+    if not list_sent:
+        chunks = build_match_list_chunks(recommended, normal, yesterday)
+        total_parts = len(chunks)
+        for part_no, chunk in enumerate(chunks, 1):
+            part_msg = chunk if total_parts == 1 else f"<i>(part {part_no}/{total_parts})</i>\n" + chunk
+            send_telegram(
+                part_msg,
+                category=f"{list_category_prefix}:{part_no}",
+                buttons=[("📊 ALL PICKS & ANALYSIS", TIPS_PAGE_URL)] if part_no == total_parts else None,
+            )
+
+    return {"status": "sent", "report_date": yesterday}
 
 
 @app.post("/api/telegram/yesterday-recap")
 def telegram_yesterday_recap(report_date: str = None):
     """A helyi statisztika-frissítés ezt hívja, a Railway API-kulccsal védve."""
     return send_yesterday_recap(report_date=report_date)
+
+
+def send_intraday_update(category: str) -> dict:
+    """
+    ÚJ: napközbeni, kb. 2 óránkénti "hogy állunk eddig" összefoglaló a MAI
+    (folyamatban lévő) napra - Stake-recommended / Watchlist bontásban,
+    mennyi már ✅ nyert / ❌ vesztett / ⏳ még függőben, és mennyi a mai
+    profit a már lezárt tippekből. Ez SZÁNDÉKOSAN csak összesítő (nem a
+    teljes meccslista), hogy ne legyen túl hosszú/ismétlődő minden
+    2 órában - a teljes, meccsenkénti lista a napi zárás után, a
+    send_yesterday_recap-ban megy ki egyszer.
+    """
+    today_day = _budapest_today()
+    try:
+        all_tips = fetch_all_tips()
+    except Exception as e:
+        log.error(f"Napközbeni összefoglaló - tips lekérés hiba: {e}")
+        return {"status": "error", "detail": "tips_query_failed"}
+
+    day_tips = _tips_for_budapest_day(all_tips, today_day)
+    if not day_tips:
+        return {"status": "no_tips"}
+
+    recommended = [t for t in day_tips if _is_recommended_tip(t)]
+    normal      = [t for t in day_tips if not _is_recommended_tip(t)]
+
+    def _group_snapshot(tips_subset):
+        total   = len(tips_subset)
+        wins    = sum(1 for t in tips_subset if t.get("result_status") == "Win")
+        losses  = sum(1 for t in tips_subset if t.get("result_status") == "Lost")
+        voided  = sum(1 for t in tips_subset if t.get("result_status") == "Void")
+        pending = total - wins - losses - voided
+        profit  = sum(
+            float(t.get("profit") or 0)
+            for t in tips_subset if t.get("result_status") in ("Win", "Lost")
+        )
+        return total, wins, losses, pending, profit
+
+    r_total, r_wins, r_losses, r_pending, r_profit = _group_snapshot(recommended)
+    n_total, n_wins, n_losses, n_pending, n_profit = _group_snapshot(normal)
+
+    now_bp = datetime.now(BUDAPEST_TZ)
+    msg  = f"⏱ <b>Live Standings – {now_bp.strftime('%H:%M')}</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"💎 <b>Stake-recommended</b> ({r_total})\n"
+    msg += f"   ✅ {r_wins}  ❌ {r_losses}  ⏳ {r_pending}\n"
+    msg += f"   💰 Profit so far: {r_profit:+,.0f} coin\n\n"
+    msg += f"👁 <b>Watchlist</b> ({n_total})\n"
+    msg += f"   ✅ {n_wins}  ❌ {n_losses}  ⏳ {n_pending}\n"
+    msg += f"   💰 Profit so far: {n_profit:+,.0f} coin"
+
+    message_id = send_telegram(
+        msg, category=category,
+        buttons=[("📊 ALL PICKS & ANALYSIS", TIPS_PAGE_URL)],
+    )
+    if not message_id:
+        return {"status": "error", "detail": "telegram_send_failed"}
+    return {"status": "sent"}
+
+
+@app.post("/api/telegram/intraday-update")
+def telegram_intraday_update_test():
+    """
+    Kézi teszteléshez / eseti kiküldéshez: azonnal elküldi a napközbeni
+    "hogy állunk" összefoglalót, FÜGGETLENÜL attól, hogy melyik órában
+    vagyunk, és megkerülve az óránkénti idempotencia-ellenőrzést (minden
+    hívás saját, egyedi kategóriát kap, tehát ezzel nem lehet duplikálni
+    az automatikus, 2 óránkénti üzeneteket). A Railway API-kulccsal védve,
+    ugyanúgy, mint a /yesterday-recap végpont.
+    """
+    category = f"intraday_manual:{datetime.now(BUDAPEST_TZ).isoformat()}"
+    return send_intraday_update(category)
+
+
+def maybe_send_intraday_update():
+    """Csak akkor küld, ha épp itt az órája (INTRADAY_UPDATE_HOURS) és ma
+    még nem ment ki erre az órára ilyen üzenet (deploy/restart-biztos)."""
+    now_bp = datetime.now(BUDAPEST_TZ)
+    if now_bp.hour not in INTRADAY_UPDATE_HOURS:
+        return
+    category = f"intraday:{now_bp.date().isoformat()}:{now_bp.hour}"
+    if _telegram_category_sent(category):
+        return
+    send_intraday_update(category)
 
 
 def check_and_notify_new_tips():
@@ -2087,6 +2333,16 @@ def live_monitor_loop():
                 except Exception as _tip_e:
                     log.error(f"Új tipp értesítés ellenőrzés hiba: {_tip_e}")
                 _last_new_tip_check = now_ts
+            # ────────────────────────────────────────────────────────────────────────
+
+            # ─── ÚJ: napközbeni (kb. 2 óránkénti) "hogy állunk" összefoglaló ──────────
+            global _last_intraday_check
+            if now_ts - _last_intraday_check >= INTRADAY_CHECK_INTERVAL_SEC:
+                try:
+                    maybe_send_intraday_update()
+                except Exception as _intraday_e:
+                    log.error(f"Napközbeni összefoglaló hiba: {_intraday_e}")
+                _last_intraday_check = now_ts
             # ────────────────────────────────────────────────────────────────────────
 
             today_tips  = get_todays_tips_from_supabase()
