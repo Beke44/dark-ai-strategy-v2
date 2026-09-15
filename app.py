@@ -31,6 +31,15 @@ SUPABASE_URL     = "https://kvduiliabfncikvesmza.supabase.co"
 SUPABASE_KEY     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2ZHVpbGlhYmZuY2lrdmVzbXphIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU3ODEyMjYsImV4cCI6MjEwMTM1NzIyNn0.9tbY11h4nFDe7IAxqcdcNcZXxcs1r1w9096A2ZlKL_0"
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL = os.getenv("TELEGRAM_CHANNEL_ID", "")
+# ÚJ (2026-09-15): második, "tiszta" Telegram csatorna - ugyanazok a meccs-
+# események (csapatok, végeredmény, gólok/lapok) mennek ki ide is, de odds,
+# tét és "pick/tipp" szó NÉLKÜL. Ezt kell window capture-rel behúzni a
+# TikTok LIVE Studio-ba, hogy a stream ne ütközzön a TikTok "Regulated
+# Goods and Services" irányelvébe. Amíg nincs beállítva a Railway-en
+# (TELEGRAM_TIKTOK_CHANNEL_ID env var), ez az ág egyszerűen nem csinál
+# semmit - a fő csatorna (TELEGRAM_CHANNEL) működése ettől függetlenül
+# 100%-ban változatlan.
+TELEGRAM_CLEAN_CHANNEL = os.getenv("TELEGRAM_TIKTOK_CHANNEL_ID", "")
 API_BASE         = "https://v3.football.api-sports.io"
 TIPS_PAGE_URL    = os.getenv("TIPS_PAGE_URL", "https://darkaistrategy.com/tips")
 BUDAPEST_TZ      = ZoneInfo("Europe/Budapest")
@@ -363,17 +372,25 @@ def send_telegram(
     category: str = None,
     fixture_id: int = None,
     buttons: list = None,
+    chat_id: str = None,
 ):
     """
     Küld egy Telegram üzenetet, és a message_id-t elmenti a Supabase
     telegram_messages táblájába - ez teszi lehetővé a későbbi (2 nap
     utáni) automatikus törlést.
+
+    MÓDOSÍTVA (2026-09-15): opcionális `chat_id` paraméter - ha nincs
+    megadva, a megszokott fő csatornára (TELEGRAM_CHANNEL) megy az üzenet,
+    változatlanul. Ha meg van adva (pl. TELEGRAM_CLEAN_CHANNEL), akkor arra
+    a csatornára küld - így a "tiszta", TikTok-biztos csatorna is ugyanezt
+    a küldési/logolási logikát használja, nem kell duplikálni.
     """
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHANNEL:
+    target_chat = chat_id or TELEGRAM_CHANNEL
+    if not TELEGRAM_TOKEN or not target_chat:
         return None
     try:
         payload = {
-            "chat_id": TELEGRAM_CHANNEL,
+            "chat_id": target_chat,
             "text": msg,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -397,7 +414,7 @@ def send_telegram(
                 sb = get_sb()
                 sb.table("telegram_messages").insert({
                     "message_id": message_id,
-                    "chat_id": str(TELEGRAM_CHANNEL),
+                    "chat_id": str(target_chat),
                     "category": category,
                     "fixture_id": fixture_id,
                 }).execute()
@@ -1744,6 +1761,27 @@ def _kickoff_cet_str(tip: dict):
         return None
 
 
+def _final_score_str(tip: dict):
+    """
+    ÚJ: a tipp fixture_id-ja alapján lekéri a lezárt meccs pontos
+    végeredményét (pl. "2-1"), a már meglévő, 1 órás cache-elésű
+    _get_fixture_details() segítségével. None, ha nincs fixture_id,
+    vagy a gólszámok bármelyike ismeretlen (pl. törölt/elhalasztott meccs).
+    """
+    fid = tip.get("fixture_id")
+    if not fid:
+        return None
+    try:
+        details = _get_fixture_details(int(fid))
+    except Exception:
+        return None
+    home_score = details.get("home_score")
+    away_score = details.get("away_score")
+    if home_score is None or away_score is None:
+        return None
+    return f"{home_score}-{away_score}"
+
+
 def build_match_list_chunks(recommended: list, normal: list, label_date: str) -> list:
     """
     ÚJ: az adott nap ÖSSZES meccsét felsoroló Telegram üzenet(ek) - csapatok,
@@ -1754,6 +1792,12 @@ def build_match_list_chunks(recommended: list, normal: list, label_date: str) ->
     lássák, mi hozta be vagy bukta a napot, ne csak az össz-számokat.
     Telegram 4096 karakteres limitje miatt szükség esetén több részre
     daraboljuk, ugyanazzal a mintával, mint a meglévő digest-küldés.
+
+    MÓDOSÍTVA (2026-09-14): minden meccssor most már a pontos végeredményt
+    (pl. "2-1") is kiírja a WON/LOST jelzés mellé - korábban csak az
+    ✅/❌ badge volt látható, a tényleges gólarány nem. A meccsek közé egy
+    üres sort is beszúrunk (a sor végén dupla sortörés), hogy a lista ne
+    tűnjön annyira zsúfoltnak, könnyebben követhető legyen a Telegramban.
     """
     divider = "━" * 18
 
@@ -1762,10 +1806,12 @@ def build_match_list_chunks(recommended: list, normal: list, label_date: str) ->
         time_part = f"  🕐 {kickoff} CET" if kickoff else ""
         league    = _tg(tip.get("league") or "Unknown league")
         comp_type = _competition_type(tip.get("league"))
+        score     = _final_score_str(tip)
+        score_part = f"  ({score})" if score else ""
         return (
             f"{idx}. <b>{_tg(tip.get('home_team'))} – {_tg(tip.get('away_team'))}</b>{time_part}\n"
             f"   🏆 {league} ({comp_type})  ·  🎯 {_tg(_pick_label(tip.get('prediction')))} · "
-            f"<b>{float(tip.get('odds') or 0):.2f}</b>  ·  {_result_badge(tip)}\n"
+            f"<b>{float(tip.get('odds') or 0):.2f}</b>  ·  {_result_badge(tip)}{score_part}\n\n"
         )
 
     rows = []
@@ -1999,7 +2045,7 @@ def check_and_notify_new_tips():
     # corrupted byte sequences before Railway starts the app.
     # Python builds the real Unicode characters at runtime from these escapes.
     tg = {
-        "football": "\u26bd",
+        "football": "⚽",
         "diamond": "\U0001f48e",
         "stadium": "\U0001f3df",
         "trophy": "\U0001f3c6",
@@ -2008,10 +2054,10 @@ def check_and_notify_new_tips():
         "chart": "\U0001f4c8",
         "money": "\U0001f4b0",
         "eye": "\U0001f441",
-        "divider": "\u2501" * 18,
-        "dash": "\u2013",
-        "bullet": "\u2022",
-        "middle_dot": "\u00b7",
+        "divider": "━" * 18,
+        "dash": "–",
+        "bullet": "•",
+        "middle_dot": "·",
     }
 
     def _tip_ids(tips_list):
@@ -2302,6 +2348,54 @@ def _live_message(
     msg += f"\n<i>Updated: {datetime.now().strftime('%H:%M')} · Automated decision support</i>"
     return msg
 
+
+# ─── ÚJ (2026-09-15): "TISZTA" (TikTok-biztos) ÉLŐ ÜZENETEK ──────────────────
+# Ugyanazok a mérkőzés-események (gól, piros lap, vége), mint a fő csatornán,
+# de NINCS bennük odds, tét, "pick"/"your pick" szó, és semmi, ami arra
+# utalna, hogy ez egy fogadási tipp - csak a foci-tartalom (csapatok, állás,
+# esemény, végeredmény ✅/❌ a hazai/döntetlen/vendég kimenetelre). Ezt kell
+# a TikTok LIVE Studio-ban window capture-rel behúzni a stream-be.
+def _clean_live_message(event_title: str, home_nm: str, away_nm: str,
+                         hg: int, ag: int, minute: int,
+                         event_detail: str = "") -> str:
+    msg  = "🔴 <b>LIVE</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n"
+    msg += f"⏱ {int(minute or 0)}'\n"
+    msg += f"🏟 <b>{_tg(home_nm)} {hg}–{ag} {_tg(away_nm)}</b>\n"
+    if event_title:
+        msg += f"\n{event_title}\n"
+    if event_detail:
+        msg += f"{_tg(event_detail)}\n"
+    msg += f"\n<i>Dark AI Strategy · {datetime.now().strftime('%H:%M')}</i>"
+    return msg
+
+
+def _clean_fulltime_message(home_nm: str, away_nm: str, hg: int, ag: int) -> str:
+    if hg > ag:
+        outcome = f"🏠 {_tg(home_nm)}"
+    elif ag > hg:
+        outcome = f"🚩 {_tg(away_nm)}"
+    else:
+        outcome = "🤝 Draw"
+    msg  = "🏁 <b>FULL TIME</b>\n"
+    msg += "━━━━━━━━━━━━━━━━━━\n"
+    msg += f"🏟 <b>{_tg(home_nm)} {hg}–{ag} {_tg(away_nm)}</b>\n\n"
+    msg += f"✅ Winner: <b>{outcome}</b>\n"
+    msg += f"\n<i>Dark AI Strategy · {datetime.now().strftime('%H:%M')}</i>"
+    return msg
+
+
+def send_clean_event(msg: str, fixture_id: int = None, category: str = "clean_live"):
+    """Elküldi a "tiszta" üzenetet a TikTok-biztos csatornára, ha be van
+    állítva (TELEGRAM_TIKTOK_CHANNEL_ID) - ha nincs, nem csinál semmit."""
+    if not TELEGRAM_CLEAN_CHANNEL:
+        return None
+    return send_telegram(
+        msg, category=category, fixture_id=fixture_id,
+        chat_id=TELEGRAM_CLEAN_CHANNEL,
+    )
+
+
 def live_monitor_loop():
     """Háttérszálon fut Railway-en 24/7."""
     global _monitor_status
@@ -2439,6 +2533,13 @@ def live_monitor_loop():
                                 msg, category="live_goal", fixture_id=fid,
                                 buttons=[("📊 PICKS & ANALYSIS", TIPS_PAGE_URL)],
                             )
+                            send_clean_event(
+                                _clean_live_message(
+                                    "⚽ <b>GOAL</b>", home_nm, away_nm,
+                                    hg, ag, minute, event_detail,
+                                ),
+                                fixture_id=fid, category="clean_goal",
+                            )
                             _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
                             log.info(f"🔔 Goal alert: {home_nm} {hg}-{ag} {away_nm}")
 
@@ -2458,6 +2559,13 @@ def live_monitor_loop():
                                 send_telegram(
                                     msg, category="live_red_card", fixture_id=fid,
                                     buttons=[("📊 PICKS & ANALYSIS", TIPS_PAGE_URL)],
+                                )
+                                send_clean_event(
+                                    _clean_live_message(
+                                        f"🟥 <b>RED CARD · {rev['minute']}'</b>",
+                                        home_nm, away_nm, hg, ag, minute, event_detail,
+                                    ),
+                                    fixture_id=fid, category="clean_red_card",
                                 )
                                 _monitor_status["alerts_sent"] = _monitor_status.get("alerts_sent",0)+1
 
@@ -2498,6 +2606,54 @@ def live_monitor_loop():
                             msg, category="live_final", fixture_id=fid,
                             buttons=[("📈 VIEW RESULTS", TIPS_PAGE_URL)],
                         )
+                        send_clean_event(
+                            _clean_fulltime_message(home_nm, away_nm, hg, ag),
+                            fixture_id=fid, category="clean_final",
+                        )
+
+                        # ─── ÚJ (2026-09-15): EREDMÉNY MENTÉSE A SUPABASE-BE ─────
+                        # EDDIG ez a blokk csak egy Telegram üzenetet küldött - a
+                        # Win/Lost eredmény sosem került vissza a "tips" táblába,
+                        # ezért minden, ami a `result_status` mezőre támaszkodik
+                        # (a napi "Match Results" lista ✅/❌ jelzése, a 2 óránkénti
+                        # "Live Standings" összesítő) örökre PENDING-nek látta a
+                        # már lezárt meccseket is. Az egyetlen dolog, ami ezt
+                        # valaha frissítette, egy külön, a te gépeden 23:00-kor
+                        # induló result_updater.py szkript volt - ha a gép ki volt
+                        # kapcsolva, vagy a csapatnév-egyezés (nem fixture_id!)
+                        # nem talált pontos találatot, az eredmény sosem íródott
+                        # be. Mostantól a meccs vége pillanatában, itt, a már
+                        # ismert Supabase sor-id alapján azonnal mentjük - nem
+                        # függ többé a helyi géptől.
+                        try:
+                            stake_amt = float(tip.get("stake") or 0)
+                            if won and stake_amt > 0 and orig_odds > 1:
+                                tip_profit = round(stake_amt * orig_odds - stake_amt, 2)
+                            elif (not won) and stake_amt > 0:
+                                tip_profit = -stake_amt
+                            else:
+                                tip_profit = 0
+                            grade_update = {
+                                "result_status": "Win" if won else "Lost",
+                                "profit": tip_profit,
+                            }
+                            sb_grade = get_sb()
+                            tip_row_id = tip.get("id")
+                            if tip_row_id:
+                                sb_grade.table("tips").update(grade_update).eq(
+                                    "id", tip_row_id
+                                ).execute()
+                            else:
+                                # Tartalék, ha valamiért nincs sor-id a tip dict-ben:
+                                # fixture_id + még Pending státusz alapján.
+                                sb_grade.table("tips").update(grade_update).eq(
+                                    "fixture_id", fid
+                                ).eq("result_status", "Pending").execute()
+                            log.info(f"📝 Eredmény mentve Supabase-be: fixture {fid} → {grade_update['result_status']}")
+                        except Exception as _grade_e:
+                            log.error(f"Eredmény mentése Supabase-be sikertelen (fixture {fid}): {_grade_e}")
+                        # ───────────────────────────────────────────────────────
+
                         if fid in today_tips: del today_tips[fid]
 
             # Polling intervallum
