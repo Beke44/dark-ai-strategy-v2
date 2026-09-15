@@ -1798,20 +1798,28 @@ def build_match_list_chunks(recommended: list, normal: list, label_date: str) ->
     ✅/❌ badge volt látható, a tényleges gólarány nem. A meccsek közé egy
     üres sort is beszúrunk (a sor végén dupla sortörés), hogy a lista ne
     tűnjön annyira zsúfoltnak, könnyebben követhető legyen a Telegramban.
+
+    MÓDOSÍTVA (2026-09-15): a sorformátum leegyszerűsítve - eddig egy
+    sorban zsúfolódott össze a kezdési idő, a liga NÉV + (típus), a tipp,
+    az odds ÉS az eredmény is, rengeteg ikonnal és középpont-elválasztóval,
+    ami telefonon nehezen áthúzhatóvá/olvashatóvá tette a listát. Mostantól
+    3 rövid sor van meccsenként: (1) csapatok, (2) liga · tipp @ odds,
+    (3) végeredmény jelzés + pontos gólarány - jóval letisztultabb, gyorsan
+    átlátható. A kezdési idő és a liga-típus (Liga/Kupa) ebből a listából
+    elhagyva, mivel egy MÁR LEZAJLOTT meccsnél ez nem hordoz plusz infót.
     """
     divider = "━" * 18
 
     def _row(idx, tip):
-        kickoff   = _kickoff_cet_str(tip)
-        time_part = f"  🕐 {kickoff} CET" if kickoff else ""
-        league    = _tg(tip.get("league") or "Unknown league")
-        comp_type = _competition_type(tip.get("league"))
-        score     = _final_score_str(tip)
-        score_part = f"  ({score})" if score else ""
+        league = _tg(tip.get("league") or "Unknown league")
+        pick   = _tg(_pick_label(tip.get("prediction")))
+        odds   = float(tip.get("odds") or 0)
+        score  = _final_score_str(tip)
+        score_part = f" · {score}" if score else ""
         return (
-            f"{idx}. <b>{_tg(tip.get('home_team'))} – {_tg(tip.get('away_team'))}</b>{time_part}\n"
-            f"   🏆 {league} ({comp_type})  ·  🎯 {_tg(_pick_label(tip.get('prediction')))} · "
-            f"<b>{float(tip.get('odds') or 0):.2f}</b>  ·  {_result_badge(tip)}{score_part}\n\n"
+            f"{idx}. <b>{_tg(tip.get('home_team'))} – {_tg(tip.get('away_team'))}</b>\n"
+            f"    {league} · {pick} @ <b>{odds:.2f}</b>\n"
+            f"    {_result_badge(tip)}{score_part}\n\n"
         )
 
     rows = []
